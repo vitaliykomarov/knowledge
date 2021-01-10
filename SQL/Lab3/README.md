@@ -24,12 +24,12 @@ Country varchar(20) NULL)
 
 --3. Types of Constraints: Match the constraint to the definition
 
-UNIQUE – 3
-NOT NULL – 1
-FOREIGN KEY – 5
-DEFAULT – 2
+UNIQUE â€“ 3
+NOT NULL â€“ 1
+FOREIGN KEY â€“ 5
+DEFAULT â€“ 2
 CHECK - 6
-PRIMARY KEY – 4
+PRIMARY KEY â€“ 4
 
 1. Specifies that a column cannot be blank
 2. Uses a default value, when no other values is entered in the column
