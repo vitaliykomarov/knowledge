@@ -2,6 +2,7 @@
 Building a simple network
 ====================
 Select PCs \ Laptops as user devices
+
 We will use 2960 switches
 
 Connect devices of the same type with a cross cable
