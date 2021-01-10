@@ -1,7 +1,9 @@
 # LAB 0
 Building a simple network
+====================
 Select PCs \ Laptops as user devices
 We will use 2960 switches
+
 Connect devices of the same type with a cross cable
 Connect the PC to the switches with a straight cable
 Assign an IP address to each PC, for example will be used 192.168.1.0/24 (mask /24=255.255.255.0)
