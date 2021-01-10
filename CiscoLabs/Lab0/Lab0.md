@@ -11,7 +11,7 @@ Open any PC, go to the Desktop tab and open IP Configuration
 In the window that opens, enter the IP address in the IP Address line, enter the mask in the Subnet Mask field (24 mask is automatically substituted)  
 ![Image](https://github.com/vitaliykomarov/knowledge/blob/main/CiscoLabs/Lab0/2.png)  
 We use the ping command to check the network, for this on any PC you need to go to the Desktop tab and open Command Prompt  
-Then enter ping (for example, with PC2 ping 192.168.1.10)
+Then enter ping (for example, with PC2 `ping 192.168.1.10`)
 ![Image](https://github.com/vitaliykomarov/knowledge/blob/main/CiscoLabs/Lab0/3.png)  
 For convenience, you can rename the switches on the diagram and in the switch itself
 ![Image](https://github.com/vitaliykomarov/knowledge/blob/main/CiscoLabs/Lab0/4.png)  
