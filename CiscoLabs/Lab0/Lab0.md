@@ -18,7 +18,7 @@ For convenience, you can rename the switches on the diagram and in the switch it
 Click on the line with the name of the switch on the diagram and change it to any other (Switch0 -> SW0)  
 Open the switch and go to the CLI tab  
 Press Enter  
-Go to the privileged mode, enter en (from the word enable)  
-Then go to the configuration mode with the command *conf t* (config terminal)  
-Then enter hostname% NAME% (hostname SW0)  
+Go to the privileged mode, enter `en` (from the word enable)  
+Then go to the configuration mode with the command `conf t` (config terminal)  
+Then enter `hostname %NAME%` (hostname SW0)  
 ![Image](https://github.com/vitaliykomarov/knowledge/blob/main/CiscoLabs/Lab0/5.png)
