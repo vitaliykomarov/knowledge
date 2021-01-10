@@ -1,0 +1,13 @@
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\bin\Debug\netcoreapp3.1\Lab2.exe
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\bin\Debug\netcoreapp3.1\Lab2.deps.json
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\bin\Debug\netcoreapp3.1\Lab2.runtimeconfig.json
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\bin\Debug\netcoreapp3.1\Lab2.runtimeconfig.dev.json
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\bin\Debug\netcoreapp3.1\Lab2.dll
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\bin\Debug\netcoreapp3.1\Lab2.pdb
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\obj\Debug\netcoreapp3.1\Lab2.csprojAssemblyReference.cache
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\obj\Debug\netcoreapp3.1\Lab2.AssemblyInfoInputs.cache
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\obj\Debug\netcoreapp3.1\Lab2.AssemblyInfo.cs
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\obj\Debug\netcoreapp3.1\Lab2.csproj.CoreCompileInputs.cache
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\obj\Debug\netcoreapp3.1\Lab2.dll
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\obj\Debug\netcoreapp3.1\Lab2.pdb
+D:\Development\C#\Labs\Lab2\Lab2\Lab2\obj\Debug\netcoreapp3.1\Lab2.genruntimeconfig.cache
