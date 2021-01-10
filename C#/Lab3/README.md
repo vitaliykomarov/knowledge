@@ -1,3 +1,4 @@
+# Lab3
 Note: For any of these exercises, ignore input validation unless otherwise directed.
 Assume the user enters values in the format that the program expects.
 
