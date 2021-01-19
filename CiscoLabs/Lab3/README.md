@@ -1,7 +1,8 @@
 # Lab 3
 Building a network with division into VLANs
 ==========================
-Task: Check ping in different VLANs  
+### Task:  
+Check ping in different VLANs  
 192.168.1.0/24  
 VLAN 40 - native  
 VLAN 99 - black hole  
