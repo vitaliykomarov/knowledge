@@ -1,0 +1,157 @@
+Настроем маршрутизацию на роутерах с несколькими VLAN, а также настроим коммутатор 3 уровня
+
+В начале зададим сетевые настройки на всех ПК
+Настроим коммутаторы 2 уровня
+Switch0
+Командой vlan %НОМЕР% создадим VLAN-ы на данном коммутаторе
+Переключим порты Fa0/1-2 порт в режим access командой switchport mode access
+Закрепим за каждым портом соответствующий VLAN командой switchport access vlan 10
+Настроим порты g0/1-2
+Закрепим за каждым портом соответствующий VLAN, переведем в режим access 
+и разрешим передачу конкретного VLAN командой switchport access vlan 10
+Первый коммутатор настроен
+
+Switch1
+Настроим аналогичным образом, но с некоторыми изменениями
+vlan 30
+exit
+vlan 40
+exit
+int f0/1
+switch
+switchport access vlan 30
+switchport mode access 
+exit
+int f0/2
+switchport mode access 
+switchport access vlan 40
+exit
+int g0/1
+switchport mode trunk 
+switchport trunk allowed vlan 10,20,30,40,50,60
+exit
+
+Switch2
+vlan 50
+exit
+vlan 60
+exit
+int f0/1
+switchport access vlan 50
+switchport mode access
+exit
+int f0/2
+switchport mode access
+switchport access vlan 60
+exit
+int g0/1
+switchport mode trunk
+switchport trunk allowed v
+switchport trunk allowed vlan 50,60
+exit
+
+Теперь приступим к настройке роутеров
+Начнем с Router1
+Так как данный роутер к каждой подсети подключен напрямую, то каждому порту необходимо задать соответствующие настройки
+int g0/0
+ip address 192.168.2.20 255.255.255.0
+no shut
+exit
+int g0/1
+ip address 192.168.10.1 255.255.255.0
+no shut
+exit
+int g0/2
+ip address 192.168.20.1 255.255.255.0
+no shut
+exit
+Настроим протокол динамической маршрутизации RIP
+router rip
+version 2
+network 192.168.2.0
+network 192.168.10.0
+network 192.168.20.0
+exit
+Router1 настроен
+
+Router0
+Порты g0/0-1 настроим как обычно
+int g0/0
+ip address 192.168.1.1 255.255.255.0
+no shut
+exit
+int g0/1
+ip address 192.168.2.1 255.255.255.0
+no shut
+exit
+Так как через порт g0/2 подключены два VLAN, то необходимо будет настроим сабинтерфейс
+Для этого необходимо ввести int g0/2.30 для VLAN30
+Но прежде, чем задать IP-адрес необходимо ввести команду encapsulation dot1Q 30 - которая используется для тегирования трафика,
+для передачи информации о принадлежности к VLAN. 
+int g0/2.30
+encapsulation dot1Q 30
+ip address 192.168.30.1 255.255.255.0
+exit
+int g0/2.40
+encapsulation dot1Q 40
+ip address 192.168.40.1 255.255.255.0
+exit
+Для включения порта g0/2 необходимо ввести no shutdown предварительно перейдя в режим конфигурирования порта командой int g0/2
+Также настрои протокол динамической маршрутизации RIP
+router rip
+version 2
+network 192.168.1.0
+network 192.168.2.0
+network 192.168.30.0
+network 192.168.40.0
+Настройка Router0 выполнена
+
+Приступим к настройке коммутатора 3-уровня Multilayer Switch0 - 3560
+Создадим VLAN-ы
+en
+conf t
+vlan 50
+exit
+vlan 60
+exit
+Настроим порт fa0/1
+int fa0/1
+switchport access vlan 50
+switchport mode access
+switchport nonegotiate - данной командой отключаем DTP кадры, 
+этот режим используется для предотвращения конфликтов с другим "не-cisco" оборудованием. 
+exit
+На данном коммутаторе нельзя настроить сабинтерфейсы, 
+но можно настроить для взаимодействия между сетями виртуальные интерфейсы 3его уровня для каждого Vlan.
+interface vlan50
+ip address 192.168.50.1 255.255.255.0
+exit
+interface vlan60
+ip address 192.168.60.1 255.255.255.0
+exit
+Настроим порт g0/1
+int g0/1
+switchport trunk encapsulation dot1q 
+switchport mode trunk
+switchport trunk allowed vlan 50,60
+exit
+Настройка порта g0/2 немного отличается, так как по умолчанию порты коммутатора работают на 2 уровне, 
+и его необходимо переключить на 3-уровень, после чего можно будет настроить IP-адрес.
+Командой no switchport переключим режим работы порта
+int g0/2
+no switchport 
+ip address 192.168.1.10 255.255.255.0
+exit
+Теперь настроим протокол динамической маршрутизации RIP
+Но для настройки функций маршрутизации предварительно необходимо ввести ip routing
+ip routing
+router rip
+version 2
+network 192.168.1.0
+network 192.168.50.0
+network 192.168.60.0
+exit
+Коммутатор 3-уровня настроен
+
+Проверяем сеть, пинг проходит
+Сеть настроена
