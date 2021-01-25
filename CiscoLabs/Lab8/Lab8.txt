@@ -1,0 +1,271 @@
+Настроим маршрутизацию между VLAN, а также настроим ACL (Access Control List)
+
+Для каждого ПК необходимо задать следующие доступы:
+
+VLAN10
+Пинговать только сервер
+
+VLAN20
+Разрешено подключаться к только к web серверу и только по IP
+
+VLAN30
+Разрешено все
+
+VLAN40
+Разрешено dns, http и пинговать PC VLAN20
+
+VLAN50
+Пинговать все и полный доступ к серверу по dns,ftp,http
+
+Порты
+FTP - 20/21
+DNS - 53
+HTTP - 80
+
+Зададим сетевые настройки на всех ПК
+Также зададим сетевые настройки на сервере Internet и настроим сервисы dns,ftp,http
+Сетевые настройки задаются также, как и на PC
+Перейдем на вкладку Services
+Убедимся, что HTTP включен
+Слева в меню выбираем DNS
+На этой вкладке включаем DNS, выбрав ON
+Теперь на этойже вкладке добавим запись A
+В поле Name укажем, например isp.com, в поле Address укажим IP-адрес сервера и нажмем Add
+Перейдем на вкладку FTP
+Проверяем включен ли сервис
+Также здесь можно добавить учетную запись, с полным доступом
+Для этого, например укажем имя isp и пароль isp, на против каждого доступа поставим галочки и нажмем Add
+Сервер настроен
+
+Начнем настройку коммутаторов и роутеров
+Для начала, например настроим коммутаторы
+
+SW0
+en
+conf t
+vlan 10
+exit
+vlan 40
+exit
+int fa0/1
+switchport access vlan 10
+switchport mode access 
+exit
+int f0/2
+switchport access vlan 40
+switchport mode access 
+exit
+int g0/1
+switchport trunk allowed vlan 10,40
+switchport mode trunk 
+SW0-настроен
+
+SW1
+en
+conf t
+vlan 30
+exit
+vlan 20
+exit
+int f0/1
+switchport access vlan 20
+switchport mode access 
+exit
+int f0/2
+switchport access vlan 30
+switchport mode access 
+exit
+int g0/1
+switchport trunk allowed vlan 20,30
+switchport mode trunk 
+exit
+SW1-настроен
+
+Настроим коммутатор 3-го уровня MS0
+en
+conf t
+vlan 50
+exit
+vlan 40
+exit
+vlan 10
+exit
+int f0/1
+switchport access vlan 50
+switchport mode access 
+switchport nonegotiate 
+exit
+int g0/1
+switchport trunk encapsulation dot1q 
+switchport trunk allowed vlan 10,40,50
+switchport mode trunk 
+exit
+int g0/2
+no sw
+no switchport 
+ip add
+ip address 192.168.1.2 255.255.255.0
+exit
+
+Теперь настроим ACL
+ACL настраивается командой access-list %НОМЕР%
+За место %НОМЕР% могут стоять следующие числа: 
+<1-99>     IP standard access list
+<100-199>  IP extended access list
+Будем задавать из расширенного ACL, для удобства будем обозначать в соответствии с VLAN 
+(например VLAN10 - 110, VLAN20 - 120 и тд)
+После номера задается permit или deny - разрешающее или запрещающее правило
+Затем выбирается протокол
+После этого для кого применяется правило
+A.B.C.D — адрес источника
+any — любой адрес хоста
+host — единственный источник хоста
+Например в случае host, надо указать IP-адрес
+Далее в зависимости от требований необходимо указать, на что распространяется правило
+A.B.C.D — адрес получателя
+any — любой конечный хост
+host — единственный конечный хост
+Например следующая команда разрешает PC VLAN10 пинговать сервер
+access-list 110 permit icmp host 192.168.10.10 host 10.0.0.10
+Продолжим настройки ACL
+access-list 110 permit icmp host 192.168.10.10 any echo-reply
+echo-reply - разрешает отвечать ПК на пинг
+access-list 110 deny ip host 192.168.10.10 any
+Запрещаем все остальные протоколы, тем самым оставляя PC VLAN10 пинговать только сервер и отвечать на пинг
+access-list 140 permit icmp host 192.168.40.40 host 192.168.20.20
+access-list 140 permit tcp host 192.168.40.40 host 10.0.0.10 eq www
+#www - World Wide Web (HTTP, 80)
+access-list 140 permit udp host 192.168.40.40 host 10.0.0.10 eq domain
+#domain - Domain Name Service (DNS, 53)
+access-list 140 deny ip host 192.168.40.40 any
+access-list 150 permit ip host 192.168.50.50 any
+ACL-настроены
+Для того что бы правила заработали их надо применить к интерфейсу, в данном случае к виртуальным интерфейсам соответствующих
+каждому VLAN
+int Vlan10
+ip address 192.168.10.1 255.255.255.0
+ip access-group 110 in
+exit
+Командой ip access-group 110 in мы применяем ACL к данному интерфейсу и VLAN
+int Vlan40
+ip address 192.168.40.1 255.255.255.0
+ip access-group 140 in
+exit
+int Vlan50
+ip address 192.168.50.1 255.255.255.0
+ip access-group 150 in
+exit
+ACL назначены
+Настроим протокол маршрутизации
+ip routing
+router rip
+version 2
+network 192.168.1.0
+network 192.168.10.0
+network 192.168.40.0
+network 192.168.50.0
+exit
+MS0-настроен
+
+Приступим к настройке роутеров
+R0
+en
+conf t
+int g0/0
+ip address 192.168.1.1 255.255.255.0
+no shut
+exit
+int g0/1
+ip address 192.168.2.1 255.255.255.0
+no shut
+exit
+router rip
+version 2
+network 192.168.1.0
+network 192.168.2.0
+exit
+R0-настроен
+
+R1
+en
+conf t
+int g0/0
+ip address 192.168.2.2 255.255.255.0
+no shut
+exit
+int g0/1
+ip address 192.168.3.1 255.255.255.0
+no shut
+exit
+router rip 
+version 2
+network 192.168.2.0
+network 192.168.3.0
+exit
+R1-настроен
+
+ISP
+en
+conf t
+int g0/0
+ip address 10.10.10.1 255.255.255.0
+no shut
+exit
+int g0/1
+ip address 10.0.0.1 255.255.255.0
+no shut
+exit
+ip route 192.168.20.0 255.255.255.0 GigabitEthernet0/0 
+ip route 192.168.10.0 255.255.255.0 GigabitEthernet0/0 
+ip route 192.168.30.0 255.255.255.0 GigabitEthernet0/0 
+ip route 192.168.40.0 255.255.255.0 GigabitEthernet0/0 
+ip route 192.168.50.0 255.255.255.0 GigabitEthernet0/0 
+ip route 192.168.1.0 255.255.255.0 GigabitEthernet0/0 
+ip route 192.168.2.0 255.255.255.0 GigabitEthernet0/0 
+ip route 192.168.3.0 255.255.255.0 GigabitEthernet0/0 
+
+Настроим последний роутер EDGE, на нем также надо настроить ACL
+EDGE
+en
+conf t
+int g0/0
+ip address 192.168.3.2 255.255.255.0
+no shut
+exit
+int g0/1
+ip add
+ip address 10.10.10.10 255.255.255.0
+no shut
+exit
+access-list 130 permit ip host 192.168.30.30 any
+access-list 120 permit icmp host 192.168.20.20 any echo-reply
+access-list 120 permit tcp host 192.168.20.20 host 10.0.0.10 eq www
+access-list 120 deny ip host 192.168.20.20 any
+access-list 120 deny icmp host 192.168.20.20 any echo
+int g0/2.20
+encapsulation dot1Q 20
+ip address 192.168.20.1 255.255.255.0
+ip access-group 120 in
+exit
+int g0/2.30
+encapsulation dot1Q 30
+ip address 192.168.30.1 255.255.255.0
+ip access-group 130 in
+exit
+int g0/2
+no shut
+exit
+ip route 0.0.0.0 0.0.0.0 g0/1
+router rip
+version 2
+passive-interface g0/1
+default-information originate 
+network 192.168.3.0
+network 192.168.20.0
+network 192.168.30.0
+exit
+EDGE-настроен
+
+Сеть настроена, ACL-настроены
+Например проверим пинг и подключение к серверу с PC VLAN20
+ACL работают корректно
