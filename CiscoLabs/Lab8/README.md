@@ -1,4 +1,4 @@
-# Lab 7
+# Lab 8
 Configure inter-VLAN routing and configure ACL (Access Control List)
 ===============================================
 For each PC, you must set the following access:
