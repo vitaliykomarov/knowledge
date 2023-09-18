@@ -1,6 +1,6 @@
 # Python
 
-For the weather script install the requests library
+For the [weather](https://github.com/vitaliykomarov/knowledge/blob/main/Python/Weather/weather.py) script install the requests library
 ```
 python -m pip install requests
 ```
