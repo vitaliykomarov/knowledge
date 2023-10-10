@@ -1,11 +1,66 @@
 # Yandex.Cloud project
 
+## Resource management
+<details>
+  <summary><h3>Start/Stop resources</h3></summary>
+  
+#### To start resources
+```
+yc managed-kubernetes cluster start kube-infra
+yc managed-kubernetes cluster start kube-prod
+yc application-load-balancer load-balancer list 
+yc managed-postgresql cluster start postgres-prod
+# with the command above, you will get the id of the load balancers
+# for each load balancer, run the following command
+yc application-load-balancer load-balancer start %LOAD_BALANCERS_ID%
+```
+#### To stop resources
+```
+yc managed-kubernetes cluster stop kube-infra
+yc managed-kubernetes cluster stop kube-prod
+yc application-load-balancer load-balancer list 
+# with the command above, you will get the id of the load balancers
+# for each load balancer, run the following command
+yc application-load-balancer load-balancer stop %LOAD_BALANCERS_ID%
+yc managed-postgresql cluster stop postgres-prod
+```
+</details>
+<details>
+  <summary><h3>Change the context of k8s</h3></summary>
+
+#### Examples of commands:
+```
+kubectl config get-contexts 
+kubectl config set-contexts 
+kubectl config use-context yc-kube-infra
+```
+</details>
+<details>
+  <summary><h3>Key change in SOPS+AGE</h3></summary>
+
+#### Examples:
+```
+# for infra
+export SOPS_AGE_KEY_FILE=$(pwd)/key_infra.txt
+export SOPS_AGE_RECIPIENTS=%AGE_KEY%
+
+# for todoapp
+export SOPS_AGE_KEY_FILE=$(pwd)/key.txt
+export SOPS_AGE_RECIPIENTS=%AGE_KEY%
+```
+</details>
+
+## GitLab repo and sctructure
+[Link](https://gitlab.com/yc-projects) to the project group in gitlab
+#### Structure
+Not ready yet...
+
 ## Step 1. GitOps model
 
 <details>
-  <summary>Long version</summary>
+  <summary><h3>Long version</h3></summary>
 
-  Configuring the CLI profile for Yandex.Cloud
+  #### Configuring the CLI profile for Yandex.Cloud
   ```
   yc init
   ```
@@ -31,7 +86,7 @@
   As soon as the creation is completed, an email with access to GitLab will be sent to the email specified in the form. 
   Do not forget to turn off self-registration after the first login.
 
-  Kubernetes Cluster
+  #### Kubernetes Cluster
   To begin with, we will create a service account for the Kubernetes cluster
   ```
   # creating an account
@@ -128,7 +183,7 @@
   echo sa-key.json >> .gitignore
   ```
 
-  Install the ALB Ingress Controller in the cluster and the Helm batch manager.
+  #### Install the ALB Ingress Controller in the cluster and the Helm batch manager.
   ```
   url -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
   chmod 700 get_helm.sh
@@ -136,11 +191,127 @@
   helm completion bash | sudo tee /etc/bash_completion.d/helm
   ```
 
+  Create a charts folder — inside it we will save all used Helm charts:
+  ```
+  mkdir charts
+  ```
+
+  Log in to Yandex helm registry
+  ```
+  export HELM_EXPERIMENTAL_OCI=1
+  cat sa-key.json | helm registry login cr.yandex --username 'json_key' --password-stdin
+  ```
+
+  Download the Ingress Controller chart to the charts folder
+  ```
+  helm pull oci://cr.yandex/yc-marketplace/yandex-cloud/yc-alb-ingress/yc-alb-ingress-controller-chart \ 
+  --version v0.1.17 \
+  --untar \
+  --untardir=charts
+  ```
+
+  The chart will be stored in the charts/yc-alb-ingress-controller-chart directory
+  Installing the chart in the cluster
+  ```
+  export FOLDER_ID=$(yc config get folder-id)
+  export CLUSTER_ID=$(yc managed-kubernetes cluster get kube-infra | head -n 1 | awk -F ': ' '{print $2}')
+
+  helm install \
+  --create-namespace \
+  --namespace yc-alb-ingress \
+  --set folderId=$FOLDER_ID \
+  --set clusterId=$CLUSTER_ID \
+  --set-file saKeySecretKey=sa-key.json \
+  yc-alb-ingress-controller ./charts/yc-alb-ingress-controller-chart/
+  ```
+
+  Check that the resources have been created
+  ```
+  kubectl -n yc-alb-ingress get all
+  ```
+  
+  Now let's start checking the Ingress Controller using the demo application
+  #### Deploying the demo application
+  Deployment and Service
+  Describe Deployment and Service. Note that the service must be of the Node Port type.
+  Saving the manifests to the file manifests/httpbin.yaml
+  ```
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: httpbin
+    labels:
+      app: httpbin
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: httpbin
+    template:
+      metadata:
+        labels:
+          app: httpbin
+      spec:
+        containers:
+          - name: httpbin
+            image: kong/httpbin:latest
+            ports:
+              - name: http
+                containerPort: 80
+  ---
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: httpbin
+  spec:
+    type: NodePort
+    selector:
+      app: httpbin
+    ports:
+      - name: http
+        port: 80
+        targetPort: 80
+        protocol: TCP
+        nodePort: 30081
+  ```
+
+  Deploying the application in K8S
+  ```
+  # creating a namespace
+  kubectl create namespace httpbin
+  # apply manifests
+  kubectl apply -n httpbin -f manifests/httpbin.yaml 
+  ```
+
+  #### Ingress
+  Ingress will require a domain name to route requests within the cluster.
+  To delegate the domain to the NS of the Yandex server inside the domain settings, change the NS records to ns1.yandexcloud.net, ns2.yandexcloud.net.
+  In the domain settings, we will prescribe Yandex nameservers so that domain records can also be managed via Yandex Cloud:
+  ns1.yandexcloud.net
+  ns2.yandexcloud.net
+
+  Create a public zone using the Yandex Cloud DNS service:
+  ```
+  yc dns zone create \
+  --name yc-courses --zone <your domain with a dot at the end> \
+  --public-visibility
+  ```
+
+  Creating a reserved IP address for the load balancer and storing its value in a variable:
+  ```
+  yc vpc address create --name=infra-alb \
+  --labels reserved=true \
+  --external-ipv4 zone=ru-central1-b
+
+  export INFRA_ALB_ADDRESS=$(yc vpc address get infra-alb --format json | jq -r .external_ipv4_address.address)
+  ```
+
+  
 
 </details>
 
 <details>
-  <summary>Short version</summary>
+  <summary><h3>Short version</h3></summary>
   
   #### Oops..it isn't ready. Maybe later :)
 
