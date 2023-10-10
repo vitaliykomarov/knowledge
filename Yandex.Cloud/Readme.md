@@ -236,6 +236,8 @@ Not ready yet...
   Describe Deployment and Service. Note that the service must be of the Node Port type.
   Saving the manifests to the file manifests/httpbin.yaml
   ```
+  vim manifests/httpbin.yaml
+
   apiVersion: apps/v1
   kind: Deployment
   metadata:
@@ -306,8 +308,136 @@ Not ready yet...
   export INFRA_ALB_ADDRESS=$(yc vpc address get infra-alb --format json | jq -r .external_ipv4_address.address)
   ```
 
-  
+  Create a wildcard A record that points to the IP of the load balancer:
+  ```
+  yc dns zone add-records --name yc-courses \
+  --record "*.infra.$DOMAIN. 600 A $INFRA_ALB_ADDRESS"
+  ```
 
+  Now you can use any domains like <application>.infra.<domain>, and we will get to the load balancer we need for the cluster.
+  Now we need to wait for the recording to appear. You can use the host or dig command to check:
+  ```
+  host test.infra.<domain>
+  ```
+
+  When the host command starts issuing the IP address of the load balancer, you can start deploying Ingress. Creating the manifests/ingress.yaml file:
+  ```
+  vim manifests/ingress.yaml
+  apiVersion: networking.k8s.io/v1
+  kind: Ingress
+  metadata:
+    name: httpbin
+    annotations:
+      ingress.alb.yc.io/subnets: <SUBNET_ID>
+      ingress.alb.yc.io/external-ipv4-address: <LOAD_BALANCER_ID>
+      ingress.alb.yc.io/group-name: infra-ingress
+      ingress.alb.yc.io/security-groups: <SECURITY_GROUP_ID>
+  spec:
+    rules:
+      - host: httpbin.infra.<domain>
+        http:
+          paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: httpbin
+                  port:
+                    number: 80  
+  ```
+
+  Pay attention to the annotations:
+  ingress.alb.yc.io/group-name : infra-alb is responsible for the load balancer, ingresses with the same group will be served by the same load balancer
+  ingress.alb.yc.io/subnets : <subnet_id> – the network that the load balancer will work with
+  The <subnet_id> parameter can be obtained using the command:
+  ```
+  export SUBNET_ID=$(yc vpc subnet get default-ru-central1-b | head -1 | awk -F ': ' '{print $2}')
+  echo $SUBNET_ID
+  ```
+  Insert the received ID into the manifest and publish the demo application:
+  ```
+  # applying the manifest
+  kubectl -n httpbin apply -f manifests/ingress.yaml  
+  ```
+
+  The load balancer is created within 3-5 minutes. You can check with the command:
+  ```
+  yc application-load-balancer load-balancer list
+  ```
+
+  When the load balancer switches to the active status, open the page
+  ```
+  httpbin.infra.<domain>
+  ```
+
+  #### Connecting certificates
+  There is a Yandex Certificate Manager service for this.
+  Create a certificate for the domain name that was previously used for the httpbin application:
+  ```
+  yc certificate-manager certificate request \
+  --name kube-infra \
+  --domains "*.infra.<domain>" \
+  --challenge dns 
+  ```
+
+  To automatically verify domain ownership, we will need to create a special CNAME record leading to the certificate-manager:
+  ```
+  yc dns zone add-records --name yc-courses --record \
+  "_acme-challenge.infra.<DOMAIN>. 600 CNAME <CERT_ID>.cm.yandexcloud.net." 
+  ```
+
+  Waiting for the certificate to switch to the ISSUED status. The certificate can be issued for a long time ⏳
+  
+  Adding a TLS certificate to Ingress:
+  ```
+  vim manifests/ingress.yaml
+
+  apiVersion: networking.k8s.io/v1
+  kind: Ingress
+  metadata:
+    name: httpbin
+    annotations:
+      ingress.alb.yc.io/subnets: <SUBNET_ID>
+      ingress.alb.yc.io/external-ipv4-address: <LOAD_BALANCER_IP>
+      ingress.alb.yc.io/group-name: infra-ingress
+      ingress.alb.yc.io/security-groups: <SECURITY_GROUP_ID>
+  spec:
+    tls:
+      - hosts:
+          - "httpbin.infra.<domain>"
+        secretName: yc-certmgr-cert-id-<CERT_ID>
+    rules:
+      - host: httpbin.infra.<domain>
+        http:
+          paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: httpbin
+                  port:
+                    number: 80 
+  ```
+
+  Apply manifest:
+  ```
+  kubectl -n httpbin apply -f manifests/ingress.yaml
+  # and check
+  yc application-load-balancer load-balancer list
+  ```
+
+  Check that everything works. Open the link `https://httpbin.infra.<domain>`
+  
+  We will not use the httpbin demo application anymore. Then expand it by other means. 
+  The certificate will still be required, and we will create deployment, servisand ingress again, so delete:
+  ```
+  kubectl delete -n httpbin -f manifests/ingress.yaml
+  kubectl delete -n httpbin -f manifests/httpbin.yaml
+  kubectl delete ns httpbin
+  ```
+
+  
+  
 </details>
 
 <details>
