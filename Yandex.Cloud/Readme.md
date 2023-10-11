@@ -436,8 +436,493 @@ Not ready yet...
   kubectl delete ns httpbin
   ```
 
+  #### Deploying Gitlab Runner
+  Creating a group of yc-courses projects in a managed GitLab and an empty infra project.\
+  In the project, open Settings → CI/CD → Runners\
+  In the tab on the left, copy the URL and token.\
+  Download the GitLab Runner chart and install:
+  ```
+  export HELM_EXPERIMENTAL_OCI=1 && \
+  helm pull oci://cr.yandex/yc-marketplace/yandex-cloud/gitlab-org/gitlab-runner/chart/gitlab-runner \
+  --version 0.49.1-8 \
+  --untar \
+  --untardir=charts
+
+  helm install gitlab-runner charts/gitlab-runner \
+  --set gitlabUrl=<URL> \
+  --set runnerRegistrationToken=<token> \
+  --set rbac.create=true \
+  --namespace gitlab \
+  --create-namespace 
+  ```
+
+  After deploying Runner, we can refresh the page and see Runner in the list.\
+  Create a file in the repository .gitlab-ci.yml with the following contents:
+  ```
+  stages:
+  - echo
   
+  echo job:
+    stage: echo
+    script:
+      - echo "Hello world!"
+  ```
+
+  We accept the changes and send a push. Our first pipeline will appear in the CI/CD section of the repository.\
+  Go inside the pipeline.\
+  Click on the job.\
+  We see our printed message.
+
+  #### ArgoCD
+  As the name suggests, the GitOps approach will require a repository.\
+  For the repository, we define the following structure:
+  ```
+  infra
+  - charts/
+  - - here we will add charts
+  - values/
+  - - here we will add files with values for charts
+  - .gitignore – ignored Git files
+  ```
+  Deploying ArgoCD in a cluster
+  First of all, we will install ArgoCD inside the created cluster.
+  To do this, download the chart locally:
+  ```
+  export HELM_EXPERIMENTAL_OCI=1 && \
+  helm pull oci://cr.yandex/yc-marketplace/yandex-cloud/argo/chart/argo-cd \
+  --version=4.5.3-1 \
+  --untar \
+  --untardir=charts
+  ```
+
+  Creating a separate values/argocd.yaml file. We will configure our ArgoCD in it. We will fill it with the contents later.
+  ```
+  mkdir values
+  touch argocd.yaml
+  ```
+  Install the chart:
+  ```
+  helm install -n argocd \
+    --create-namespace \
+    argocd charts/argo-cd
+  ```
+
+  After that, ArgoCD will deploy inside the cluster.\
+  To access the ArgoCD web interface, you need to perform a portforward to the desired service:
+  ```
+  kubectl port-forward svc/argocd-server -n argocd 8080:443 
+  ```
+  Next, open the address `http://localhost:8080` in your browser.\
+  The user name is admin. The password can be obtained from the Secret created by ArgoCD during deployment:
+  ``` 
+  kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
+  ```
+
+  #### Linking ArgoCD with GitLab
+  Setting up GitLab\
+  The infra repository will store all the infrastructure components that you deploy via ArgoCD.\
+  ArgoCD itself will need read access to this repository, so you need to create a token with access to the repository for argo-cd.\ 
+  You need to grant the read_repository right and the Developer role.
+  ```
+  Gitlab
+  	project Infra
+  		Settings->Access Tokens
+  Create token for Argo-CD
+  Token name 		agro-cd
+  Role:			Developer
+  Scopes:			read_repositor
+  ```
+
+  Setting up ArgoCD\
+  Add to the previously created file values/argocd.yaml the following content:
+  ```
+  vim values/argocd.yaml
+
+  configs:
+    repositories:
+      infra:
+        password: <AccessToken>
+        project: default
+        type: git
+        url: https://<GitlabHost>/yc-courses/infra.git
+        username: gitlab-ci-token
+  ```
+  AccessToken — token received in GitLab.\
+  GitlabHost — the address of your GitLab instance.
+
+  After that, we will apply the chart again:
+  ```
+  helm -n argocd upgrade --install \
+      argocd \
+      charts/argo-cd \
+      -f values/argocd.yaml
+  ```
+
+  A new Secret named argocd-repo-infra should appear in the argocd namespace:
+  ```
+  kubectl -n argocd get secret argocd-repo-infra
+  #NAME                TYPE     DATA   AGE
+  #argocd-repo-infra   Opaque   5      15h
+  ```
+  You can verify this in the UI at `https://localhost:8080/settings/repos`.
+
+  #### Secret Management
+  To hide passwords from the Git repository, we will connect the Helm Secrets tool.
+  It allows you to encrypt sensitive information using various methods and decrypt it when applied.
+  Installing helm-secrets via the helm plugin:
+  ```
+  helm plugin install https://github.com/jkroepke/helm-secrets --version v3.15.0
+  ```
+  Installing dependencies:\
+  Sops is a utility that can encrypt and decrypt configuration files\
+  Age is an encryption utility that Sops already uses to work with configuration files\
+  Now we will prepare the key with which the values files will be encrypted:
+  ```
+  age-keygen -o key.txt
+  ```
+  Be sure to add key.txt in .gitignore so that it doesn't end up in Git 
+  `add key.txt and *.dec in .gitignore`\
+  Specify the path to the encryption key for Sops:
+  ```
+  export SOPS_AGE_KEY_FILE=$(pwd)/key.txt
+  export SOPS_AGE_RECIPIENTS=<the public key that the above command printed out>
+  ```
+  $(pwd) is specified here specifically. Use an absolute path, so encryption and decryption will work correctly.\
+  Encrypt the values/argocd file.yaml:
+  ```
+  helm secrets enc values/argocd.yaml
+  ```
+  Now we can safely send the commit to GitLab.\
+  To update the application, we will use the helm secrets command instead of helm.\
+  For example, installing the ArgoCD chart:
+  ```
+  helm secrets -n argocd upgrade --install \
+      argocd \
+      charts/argo-cd \
+      -f values/argocd.yaml
+  ```
+  Be sure to commit all changes and send them to GitLab so that the ArgoCD application can download the chart from the repository.
+
+  #### Connecting Helm Secrets to ArgoCD
+  Now we need to teach ArgoCD how to work with encrypted values files.\
+  Inside the argocd container, install helm secrets.\ 
+  Creating a Secret inside the cluster with the key key.txt , which was created earlier.\
+  We throw the Secret inside the argocd container.\
+  Creating a Secret:
+  ```
+  kubectl -n argocd create secret generic \
+  helm-secrets-private-keys --from-file=key.txt
+  ```
+
+  Edit values/argocd.yaml.\
+  To do this, use the helm secrets dec values/argocd.yaml command and create a decoded version .dec and making changes to it:
+  ```
+  helm secrets dec values/argocd.yaml
+  vim values/argocd.yaml.dec
   
+  configs:
+    repositories:
+      infra:
+        password: <AccessToken>
+        project: default
+        type: git
+        url: https://<GitlabHost>/yc-courses/infra.git
+        username: gitlab-ci-token
+  server:
+      config:
+          # Teaching helm to interact with schemas of values files
+          # we are specifically interested in secrets
+          helm.valuesFileSchemes: secrets+gpg-import, secrets+gpg-import-kubernetes, secrets+age-import, secrets+age-import-kubernetes, secrets, https
+  
+  # Copying the configuration from the documentation
+  repoServer:
+      env:
+          - name: HELM_PLUGINS
+            value: /custom-tools/helm-plugins/
+          - name: HELM_SECRETS_HELM_PATH
+            value: /usr/local/bin/helm
+          - name: HELM_SECRETS_SOPS_PATH
+            value: /custom-tools/sops
+          - name: HELM_SECRETS_KUBECTL_PATH
+            value: /custom-tools/kubectl
+          - name: HELM_SECRETS_CURL_PATH
+            value: /custom-tools/curl
+          - name: HELM_SECRETS_VALUES_ALLOW_SYMLINKS
+            value: "false"
+          - name: HELM_SECRETS_VALUES_ALLOW_ABSOLUTE_PATH
+            value: "false"
+          - name: HELM_SECRETS_VALUES_ALLOW_PATH_TRAVERSAL
+            value: "true"
+      volumes:
+          - name: custom-tools
+            emptyDir: {}
+          # Creating a volume from Secret with a key key.txt
+          - name: helm-secrets-private-keys
+            secret:
+              secretName: helm-secrets-private-keys
+      volumeMounts:
+          - mountPath: /custom-tools
+            name: custom-tools
+          # Mounting volume with Secret with key key.txt
+          - mountPath: /helm-secrets-private-keys/
+            name: helm-secrets-private-keys
+      initContainers:
+          - name: download-tools
+            image: alpine:latest
+            command:
+              - sh
+              - -ec
+            env:
+              - name: HELM_SECRETS_VERSION
+                value: 3.15.0
+              - name: SOPS_VERSION
+                value: 3.7.3
+              - name: KUBECTL_VERSION
+                value: 1.24.0
+            args:
+              - |
+                mkdir -p /custom-tools/helm-plugins
+                wget -qO- https://github.com/jkroepke/helm-secrets/releases/download/v${HELM_SECRETS_VERSION}/helm-secrets.tar.gz | tar -C /custom-tools/helm-plugins -xzf-;
+  
+                wget -qO /custom-tools/sops https://github.com/mozilla/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux
+                wget -qO /custom-tools/kubectl https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl
+                wget -qO /custom-tools/curl https://github.com/moparisthebest/static-curl/releases/latest/download/curl-amd64 \
+  
+                chmod +x /custom-tools/*
+            volumeMounts:
+              - mountPath: /custom-tools
+                name: custom-tools 
+  ```
+  Do not forget to encrypt our file back:  
+  ```
+  helm secrets enc values/argocd.yaml
+  helm secrets clean . # delete the .dec (unencrypted) version of the file
+  ```
+  To protect yourself from commits with unencrypted values, you can add the string *.dec to .gitignore. 
+
+  Applying a chart with updated values:
+  ```
+  helm secrets -n argocd upgrade --install \
+    argocd \
+    charts/argo-cd \
+    -f values/argocd.yaml
+  ```
+
+  Let's make sure everything works:
+  ```
+  kubectl -n argocd get all
+  ```
+  Let's check that ArgoCD is still opening.
+
+  #### App of apps
+  We can create applications in ArgoCD by adding new Application manifests. In order not to do it manually and adhere to the IaC approach, we will resort to using the App of Apps pattern. 
+  Its essence is to create an application that creates other applications. First we need to create a Helm chart, in which we will describe the rest of the applications.\
+  Create a directory for the chart and create a file inside this directory Chart.yaml with the following contents:
+  ```
+  mkdir charts/apps
+  vim charts/apps/Chart.yaml
+
+  apiVersion: v2
+  name: applications
+  description: Applications
+  version: 0.1.0
+  appVersion: "1.0"
+  ```
+  Next, create the file "values.yaml" with empty values:
+  ```
+  vim charts/apps/values.yaml
+  
+  spec:
+    source:
+      repoURL:
+      targetRevision:
+    destination:
+      server:
+  ```
+
+  We have described the parameters that will be used inside the chart.\
+  Creating the templates directory, where we will describe all applications:
+  ```
+  mkdir charts/apps/templates
+  ```
+  Let's describe the parameters for the chart in the values/apps.yaml file:
+  ```
+  spec:
+    source:
+      repoURL: https://<GitlabHost>/yc-courses/infra.git
+      targetRevision: HEAD
+    destination:
+      server: https://kubernetes.default.svc
+  ```
+  Now let's create the Application itself. To do this, go to the file values/argocd.yaml let's add the application specification.
+  But before that its values/argocd.yaml needs to be decoded:
+  ```
+  helm secrets dec values/argocd.yaml
+  vim values/argocd.yaml.dec
+  
+  configs:
+    repositories:
+      infra:
+        password: <AccessToken>
+        project: default
+        type: git
+        url: https://<GitlabHost>/yc-courses/infra.git
+        username: gitlab-ci-token
+  
+  server:
+    config:
+          helm.valuesFileSchemes: secrets+gpg-import, secrets+gpg-import-kubernetes, secrets+age-import, secrets+age-import-kubernetes, secrets, https
+    additionalApplications:
+      - name: apps
+        namespace: argocd
+        project: default
+        source:
+          # Specifying the path to values, note that it is relative
+          helm:
+            valueFiles:
+              - ../../values/apps.yaml
+          # The path to the chart
+          path: charts/apps
+          # Repository
+          repoURL: https://<GitlabHost>/yc-courses/infra.git
+        destination:
+          # Install all applications in the same argocd namespace
+          namespace: argocd
+          server: https://kubernetes.default.svc
+        syncPolicy:
+          automated: { }
+  
+  repoServer:
+      env:
+          - name: HELM_PLUGINS
+            value: /custom-tools/helm-plugins/
+          # In case wrapper scripts are used, HELM_SECRETS_HELM_PATH needs to be the path of the real helm binary
+          - name: HELM_SECRETS_HELM_PATH
+            value: /usr/local/bin/helm
+          - name: HELM_SECRETS_SOPS_PATH
+            value: /custom-tools/sops
+          - name: HELM_SECRETS_KUBECTL_PATH
+            value: /custom-tools/kubectl
+          - name: HELM_SECRETS_CURL_PATH
+            value: /custom-tools/curl
+          # https://github.com/jkroepke/helm-secrets/wiki/Security-in-shared-environments
+          - name: HELM_SECRETS_VALUES_ALLOW_SYMLINKS
+            value: "false"
+          - name: HELM_SECRETS_VALUES_ALLOW_ABSOLUTE_PATH
+            value: "false"
+          - name: HELM_SECRETS_VALUES_ALLOW_PATH_TRAVERSAL
+            value: "true"
+      volumes:
+          - name: custom-tools
+            emptyDir: {}
+          - name: helm-secrets-private-keys
+            secret:
+              secretName: helm-secrets-private-keys
+      volumeMounts:
+          - mountPath: /custom-tools
+            name: custom-tools
+          - mountPath: /helm-secrets-private-keys/
+            name: helm-secrets-private-keys
+      initContainers:
+          - name: download-tools
+            image: alpine:latest
+            command:
+              - sh
+              - -ec
+            env:
+              - name: HELM_SECRETS_VERSION
+                value: 3.15.0
+              - name: SOPS_VERSION
+                value: 3.7.3
+              - name: KUBECTL_VERSION
+                value: 1.24.0
+            args:
+              - |
+                mkdir -p /custom-tools/helm-plugins
+                wget -qO- https://github.com/jkroepke/helm-secrets/releases/download/v${HELM_SECRETS_VERSION}/helm-secrets.tar.gz | tar -C /custom-tools/helm-plugins -xzf-;
+  
+                wget -qO /custom-tools/sops https://github.com/mozilla/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux
+                wget -qO /custom-tools/kubectl https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl
+                wget -qO /custom-tools/curl https://github.com/moparisthebest/static-curl/releases/latest/download/curl-amd64 \
+  
+                chmod +x /custom-tools/*
+            volumeMounts:
+              - mountPath: /custom-tools
+                name: custom-tools
+  ```
+
+  Do not forget to encrypt values/argocd.yaml
+  ```
+  helm secrets enc values/argocd.yaml
+  helm secrets clean .
+  ```
+  Applying the chart again:
+  ```
+  helm secrets -n argocd upgrade --install \
+      argocd \
+      charts/argo-cd \
+      -f values/argocd.yaml 
+  ```
+  Check in the ArgoCD interface that the application was created and moved to the synced status.
+
+  Now the following actions are required for any new application:\
+  -Add the application chart to the charts folder\
+  -Add Namespace and Application to templates of the apps chart\
+  -Add values file for deployment
+
+
+  #### Deploying the ALB Ingress Controller via ArgoCD
+  For the fastest possible setup, I recommend deleting the previous installation of Ingress Controller.\
+  To do this, first delete all Ingress:
+  ```
+  kubectl delete ingresses --all --all-namespaces 
+  ```
+  The command will be executed for a long time, since the ALB load balancer, which was previously created by the Ingress controller itself, will be deleted. 
+  Be sure to wait for this command to be executed before running the following.\
+  Then we will delete the namespace with the controller:
+  ```
+  kubectl delete namespace yc-alb-ingress 
+  ```
+
+  Synchronize the current repository structure.
+  ```
+  infra/
+  - charts/
+  - - apps/
+  - - - templates/
+  - - - Chart.yaml
+  - - - values.yaml
+  - - argo-cd/
+  - - - argocd chart's files
+  - values/
+  - - argo-cd.yaml
+  - - apps.yaml
+  - .gitignore 
+  ```
+
+  Let's transfer the Ingress Controller chart that we downloaded to the infra repository or just download it again:
+  ```
+  helm pull oci://cr.yandex/yc-marketplace/yandex-cloud/yc-alb-ingress/yc-alb-ingress-controller-chart \
+  --version v0.1.17 \
+  --untar \
+  --untardir=charts
+  ```
+
+  Create a file values/alb.yaml with the values:
+  ```
+  vim values/alb.yaml
+  
+  folderId: <Folder_ID>
+  clusterId: <Cluster_ID>
+  saKeySecretKey: |
+    here we insert the contents of the sa-key.json file
+  ```
+
+  Encrypt the file:
+  ```
+  helm secrets enc values/alb.yaml
+  ```
+
 </details>
 
 <details>
