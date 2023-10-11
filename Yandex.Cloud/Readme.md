@@ -1226,7 +1226,209 @@ Not ready yet...
       -f values/argocd.yaml
   ```
   Check that ArgoCD has started opening via the link `https://argocd.infra.<domain>`.
+
+  #### Deploying Crossplane with Yandex Cloud support
+  Download Helm chart Crossplane:
+  ```
+  export HELM_EXPERIMENTAL_OCI=1
+  helm pull oci://cr.yandex/yc-marketplace/crossplane/crossplane/crossplane --untar --untardir=charts --version=1.6.3-5
+  ```
+  Create a service account for a cosplay and give him the admin role so that he can create any infrastructure entities inside Yandex Cloud:
+  ```
+  yc iam service-account create --name crossplane
+  yc resource-manager folder add-access-binding \
+    --name=default \
+    --service-account-name=crossplane \
+    --role=admin
+  ```
+  Creating an authorization key for the service account. It needs to be thrown into values for the crossplane chart:
+  ```
+  yc iam key create --service-account-name crossplane --output sa-key.json
+  ```
+  Creating a file values/crossplane.yaml:
+  ```
+  vim values/crossplane.yaml
+
+  providerJetYC:
+      creds: |
+          <contents of the sa-key.json file>
+  provider:
+    packages:
+      - cr.yandex/crp0kch415f0lke009ft/crossplane/provider-jet-yc:v0.1.37 
+  ```
+  Encrypt values/crossplane.yaml:
+  ```
+  helm secrets enc values/crossplane.yaml
+  ```
+
+  Now add the Application for Crossplane and, similarly to the applications from the previous lesson, create the charts/apps/templates/crossplane.yaml file:
+  ```
+  vim charts/apps/templates/crossplane.yaml
   
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: crossplane
+    annotations:
+      argocd.argoproj.io/sync-wave: "-1"
+  ---
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: crossplane
+    namespace: argocd
+  spec:
+    destination:
+      namespace: crossplane
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      # path to the chart
+      path: charts/crossplane
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      helm:
+        # put the path to the values file
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/crossplane.yaml
+    syncPolicy:
+      automated: {}
+
+  # at this stage, I had to add the next block, since the crossplane was not created
+
+  ```
+
+  Commit and send to GitLab.\
+  Check that a new application has appeared in ArgoCD.
+
+  Pay attention to the Crossplane — OutOfSync status. If we go inside, we will see that the role of the crossplane cluster is in the Out Of Sync state.
+
+  The fact is that for Crossplane, the Yandex provider automatically adds rules by which the crossplane role is allowed to work with new types of resources that the Yandex provider has created.
+  Just for such cases, ArgoCD has the ability to ignore the difference between the desired and real fields. We will use it.\
+  To do this, we will add the following to our application manifest:
+  ```
+  vim charts/apps/templates/crossplane.yaml
+
+  # add the next block after "syncPolicy"
+    ignoreDifferences:
+      - kind: ClusterRole # in which entities to ignore
+        group: rbac.authorization.k8s.io # from which group of entities
+        name: crossplane # name of a specific entity
+        jsonPointers:
+          - /rules # the path to the ignored field
+  ```
+  Commit and send to GitLab.\
+  After that, we launch the update for apps and crossplane.\
+  Now the status of the Crossplane application has changed to Synced.
+
+  Importing already created resources into the Crossplane.\
+  We need to create an application for the infrastructure in which we will save the manifests and apply them via ArgoCD.\
+  To do this, we create a new chart for the general infrastructure and call it infra-yc:
+  ```
+  mkdir charts/infra-yc
+  ```
+  Creating a file charts/infra-yc/Chart.yaml:
+  ```
+  vim charts/infra-yc/Chart.yaml
+  
+  apiVersion: v2
+  name: infra-yc
+  description: infra-yc
+  version: 0.1.0
+  appVersion: "1.0"
+  ```
+  Creating the file charts/infra-yc/values.yaml. We leave it empty, since we have nothing to parameterize in the chart yet.
+  ```
+  touch charts/infra-yc/values.yaml
+  ```
+  Create a directory "charts/infra-yc/templates", and in it "import.yaml".
+  To import the created entity into Crossplane, we will put a special annotation "crossplane.io/external-name ". 
+  It points to the ID of the desired resource.
+  ```
+  mkdir charts/infra-yc/templates
+  vim charts/infra-yc/templates/import.yaml
+  
+  # First of all, we import the catalog
+  apiVersion: resourcemanager.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: Folder
+  metadata:
+    name: default
+    annotations:
+      crossplane.io/external-name: "<FOLDER_ID from yc config list>"
+  spec:
+    # this parameter is for security
+    # to avoid deleting a directory when deleting a resource from kubernetes
+    deletionPolicy: Orphan
+    forProvider:
+      # default – the default directory name
+      # if your directory is called differently, specify this other name
+      name: default
+  ---
+  # The next step is to import the network
+  kind: Network
+  apiVersion: vpc.yandex-cloud.jet.crossplane.io/v1alpha1
+  metadata:
+    name: default
+    annotations:
+      crossplane.io/external-name: "<NETWORK_ID from yc vpc network list>"
+  spec:
+    deletionPolicy: Orphan
+    forProvider:
+      name: default
+      # please note that the directory id does not need to be specified anymore
+      # it is enough to use a reference to another crossplane entity
+      folderIdRef:
+        name: default
+  ---
+  # Importing the subnet default-ru-central1-b
+  kind: Subnet
+  apiVersion: vpc.yandex-cloud.jet.crossplane.io/v1alpha1
+  metadata:
+    name: default-ru-central1-b
+    annotations:
+      crossplane.io/external-name: "<SUBNET_ID from yc vpc subnet get default-ru-central1-b>"
+  spec:
+    forProvider:
+      networkIdRef:
+        name: default
+      folderIdRef:
+        name: default
+      v4CidrBlocks:
+        - 10.129.0.0/24  # take from command yc vpc subnet get default-ru-central1-b
+  ```
+
+  To add our chart to ArgoCD, create a file charts/apps/templates/infra-yc.yaml with a description of the application:
+  ```
+  vim charts/apps/templates/infra-yc.yaml
+
+  # Creating a namespace for the infrastructure
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: infrastructure
+    annotations:
+      argocd.argoproj.io/sync-wave: "-1"
+  ---
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: infra-yc
+    namespace: argocd
+  spec:
+    destination:
+      # namespace, where the chart itself will be installed
+      namespace: infrastructure
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/infra-yc
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+    syncPolicy:
+      automated: {}
+  ```
+  Commit and send to GitLab.\
+  When the app appears in ArgoCD, wait for the Healthy and Synced statuses.
 
 </details>
 
