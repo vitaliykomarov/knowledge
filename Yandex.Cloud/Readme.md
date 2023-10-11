@@ -923,6 +923,311 @@ Not ready yet...
   helm secrets enc values/alb.yaml
   ```
 
+  Now let's add an application with Ingress to our chart with all applications.\
+  To do this, create a file charts/apps/templates/alb.yaml:
+  ```
+  vim charts/apps/templates/alb.yaml
+  
+  # Создаем неймспейс для контроллера
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: yc-alb-ingress
+    annotations:
+      # Using this parameter, we specify the order of creation
+      argocd.argoproj.io/sync-wave: "-1" 
+  ---
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: yc-alb-ingress
+    # Pay attention to the namespace – it should be argocd
+    namespace: argocd
+  spec:
+    destination:
+      # And here is the namespace, where the chart itself will be installed
+      namespace: yc-alb-ingress
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      # Specifying the path to the chart
+      path: charts/yc-alb-ingress-controller-chart
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      # Note that we specify the path to the encrypted values in the new format
+      # secrets+age-import://<key-volume-mount>/<key-name>.txt?<relative/path/to/the/encrypted/secrets.yaml>
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/alb.yaml
+    syncPolicy:
+      automated: {}
+  ```
+
+  Now commit and send to GitLab
+  ```
+  git add .
+  git commit -m "" # your own comment
+  git push
+  ```
+
+  Enjoying automatic deployment from the Git repository.\
+  Open the web interface and wait for automatic synchronization.\
+  Synchronization can take time – argocd polls repositories every three minutes.\
+  We can go inside the yc-alb-ingress application and see all the deployed components.\
+  That's all! Ingress Controller is deployed in a few minutes.
+
+  #### GitLab Runner
+  Adding the chart to the repository
+  ```
+  helm repo add gitlab https://charts.gitlab.io
+  helm pull gitlab/gitlab-runner --untar --untardir=charts --version=0.41.0
+  ```
+
+  Adding values/gitlab-runner.yaml:
+  ```
+  vim values/gitlab-runner.yaml
+
+  gitlabUrl: <URL Gitlab>
+  runnerRegistrationToken: <Registration_Token>
+  rbac:
+    create: true
+  ```
+  Encrypting the file:
+  ```
+  helm secrets enc values/gitlab-runner.yaml 
+  ```
+
+  Adding an application, creating a file charts/apps/templates/gitlab-runner.yaml:
+  ```
+  vim charts/apps/templates/gitlab-runner.yaml
+
+  # Creating a namespace for gitlab-runner
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: gitlab-runner
+    annotations:
+      # Using this parameter, we specify the order of creation
+      argocd.argoproj.io/sync-wave: "-1"
+  ---
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: gitlab-runner
+    # Pay attention to the namespace – it should be argocd
+    namespace: argocd
+  spec:
+    destination:
+      # And here is the namespace, where the chart itself will be installed
+      namespace: gitlab-runner
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      # Specifying the path to the chart
+      path: charts/gitlab-runner
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      # Specify the path to the file
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/gitlab-runner.yaml
+    syncPolicy:
+      automated: {}
+  ```
+
+  Commit, send it to GitLab and wait for the apps application to sync and start creating a gitlab-runner application:
+  ```
+  helm secrets clean .
+  git add .
+  git commit -m "update alb"
+  git push
+  ```
+
+  We go inside the application and make sure that all components are deployed.\ 
+  Check that runner has appeared in GitLab.\
+  Restarting the echo task.
+
+  #### Httpbin
+  The easiest way would be to create a Helm chart without parameters and from a single file.\
+  Create a file charts/httpbin/templates/all.yaml, into which we copy the manifests, and make subnetId and certificateID parameters:
+  ```
+  mkdir charts/httpbin
+  mkdir charts/httpbin/templates
+  vim charts/httpbin/templates/all.yaml
+  
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: httpbin
+    labels:
+      app: httpbin
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: httpbin
+    template:
+      metadata:
+        labels:
+          app: httpbin
+      spec:
+        containers:
+          - name: httpbin
+            image: kong/httpbin:latest
+            ports:
+              - name: http
+                containerPort: 80
+  ---
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: httpbin
+  spec:
+    type: NodePort
+    selector:
+      app: httpbin
+    ports:
+      - name: http
+        port: 80
+        targetPort: 80
+        protocol: TCP
+        nodePort: 30081
+  ---
+  apiVersion: networking.k8s.io/v1
+  kind: Ingress
+  metadata:
+    name: httpbin
+    annotations:
+      ingress.alb.yc.io/subnets: {{ .Values.subnetId }}
+      ingress.alb.yc.io/external-ipv4-address: <IP_ADDR>
+      ingress.alb.yc.io/group-name: infra-ingress
+      ingress.alb.yc.io/security-groups: <ID_OF_THE_SG_yc-secure-group>
+  spec:
+    tls:
+      - hosts:
+          - "httpbin.infra.<domain>"
+        secretName: yc-certmgr-cert-id-{{ .Values.certificateId }}
+    rules:
+      - host: httpbin.infra.<domain>
+        http:
+          paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: httpbin
+                  port:
+                    number: 80
+  ```
+  Create a file charts/httpbin/Chart.yaml:
+  ```
+  vim charts/httpbin/Chart.yaml
+
+  apiVersion: v2
+  name: httpbin
+  description: httpbin
+  version: 0.1.0
+  appVersion: "1.0"
+  ```
+  Create a file charts/httpbin/values.yaml:
+  ```
+  vim charts/httpbin/values.yaml
+
+  subnetId:
+  certificateId:
+  ```
+  Now write the chart values to the values/httpbin.yaml:
+  ```
+  vim values/httpbin.yaml
+
+  subnetId: <SUBNET_ID>
+  certificateId: <CERT_ID>
+  ```
+  Encrypt the file:
+  ```
+  helm secrets enc values/httpbin.yaml
+  ```
+  Adding a new application, creating a file charts/apps/templates/httpbin.yaml:
+  ```
+  vim charts/apps/templates/httpbin.yaml
+
+  apiVersion: v1
+  kind: Namespace
+  metadata:
+    name: httpbin
+    annotations:
+      argocd.argoproj.io/sync-wave: "-1"
+  ---
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: httpbin
+    namespace: argocd
+  spec:
+    destination:
+      namespace: httpbin
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/httpbin
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/httpbin.yaml
+    syncPolicy:
+      automated: {} 
+  ```
+  Commit and send to GitLab:
+  ```
+  git add .
+  git commit -m "create httpbin"
+  git push
+  ```
+  Opening ArgoCD
+  Opening the application
+
+  #### Ingress for ArgoCD
+  Editing values/argocd.yaml:
+  ```
+  vim values/argocd.yaml
+
+  server:
+    # ... previous values
+    
+    # Changing the service type to NodePort
+    service:
+        nodePortHttp: 30082
+        type: NodePort
+    # Turn on ingress, prescribe the host, subnet, address and group
+    ingress:
+        annotations:
+            ingress.alb.yc.io/subnets: <subnetId>
+            ingress.alb.yc.io/external-ipv4-address: <IP_ADDR>
+            ingress.alb.yc.io/group-name: infra-ingress
+            ingress.alb.yc.io/security-groups: <ID_SG_yc-secure-group>
+            # communication between the load balancer and argocd is also via https
+            ingress.alb.yc.io/transport-security: tls
+        enabled: true
+        # specify that https is used
+        https: true
+        tls:
+            - hosts:
+                - argocd.infra.<domain>
+              secretName: yc-certmgr-cert-id-<CERT_ID>
+        hosts:
+            - argocd.infra.<domain> 
+  ```
+  Applying the chart:
+  ```
+  helm secrets -n argocd upgrade --install \
+      argocd \
+      charts/argo-cd \
+      -f values/argocd.yaml
+  ```
+  Check that ArgoCD has started opening via the link `https://argocd.infra.<domain>`.
+  
+
 </details>
 
 <details>
