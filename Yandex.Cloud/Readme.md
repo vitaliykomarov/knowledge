@@ -2442,6 +2442,176 @@ vim charts/infra-yc/templates/service_accounts.yaml
   Syncing apps application.
 
   #### Helm Chart and Application in ArgoCD
+  Create a new todofrontend repository in your GitLab and copy the todofrontend chart to it using the link:\
+  https://github.com/yandex-cloud-examples/yc-courses-devops-course1/tree/master/todoapp/charts
+
+  Create values/todofrontend-prod.yaml:
+  ```
+  # todoapp repo
+  vim values/todofrontend-prod.yaml
+  
+  image:
+      tag: <an image tag that can be peeked at in the build logs>
+      repository: cr.yandex/<id registry>/yc-courses/todofrontend
+  
+  ingress:
+      # Включаем ingress
+      enabled: true
+      annotations:
+          ingress.alb.yc.io/subnets: <SUBNET_ID>
+          ingress.alb.yc.io/external-ipv4-address: <PROD_IP>
+          ingress.alb.yc.io/group-name: apps-ingress
+          ingress.alb.yc.io/security-groups: <PROD_SG_ID>
+      hosts:
+          - host: todoapp.apps.<domain>
+            paths:
+              - path: /
+                pathType: ImplementationSpecific
+      tls:
+          - hosts:
+              - todoapp.apps.<domain>
+            secretName: yc-certmgr-cert-id-<CERT_ID *.apps.<domain>>
+  
+  service:
+      type: NodePort
+      nodePort: 30083 # port to choose from
+  ```
+
+  Synchronizing the repository structure:
+  ```
+  charts/
+  - todofrontend/
+  - - templates/
+  - - - _helpers.tpl
+  - - - deployment.yaml
+  - - - ingress.yaml
+  - - - NOTES.txt
+  - - - service.yaml
+  - - .helmignore
+  - - Chart.yaml
+  - - values.yaml
+  values/
+  - todofrontend-prod.yaml
+  ```
+
+  Connecting a new encryption key for applications.\
+  Since we will grant access to the new repository to developers, it would be nice to create a separate key for encrypting values files so that developers do not have access to managing the infrastructure itself.\
+  Generate a new key in the todoapp repository:
+  ```
+  age-keygen -o %FILE_NAME%.txt
+  ```
+  Add this key to .gitignore
+
+  Create a new helm-secrets-private-keys-apps secret in the infrastructure cluster:
+  ```
+  kubectl -n argocd create secret generic \
+  helm-secrets-private-keys-apps --from-file=%FILE_NAME%.txt
+  ```
+  Mount the secret in an ArgoCD container. \
+  To do this, edit values/argocd.yaml in the infra repository and add the lines:
+  ```
+  # infra repo
+  helm secrets dec values/argocd.yaml
+  vim values/argocd.yaml.dec
+  
+  # add
+  repoServer:
+      ...
+      volumes:
+          ...
+          - name: helm-secrets-private-keys-apps
+            secret:
+              secretName: helm-secrets-private-keys-apps
+      volumeMounts:
+          ...
+          - mountPath: /helm-secrets-private-keys-apps/
+            name: helm-secrets-private-keys-apps
+  ```
+  Encrypt values/argocd.yaml and delete values/argocd.yaml.dec.
+  ```
+  helm secrets enc values/argocd.yaml
+  ```
+  Apply the updated ArgoCD chart:
+  ```
+  helm secrets -n argocd upgrade --install \
+    argocd \
+    charts/argo-cd \
+    -f values/argocd.yaml
+  ```
+
+  Encrypt the values file of the values/todofrontend-prod.yaml key for developers:
+  ```
+  # todoapp repo
+  
+  export SOPS_AGE_KEY_FILE=$(pwd)/key.txt
+  export SOPS_AGE_RECIPIENTS=%KEY%
+  helm secrets enc values/todofrontend-prod.yaml
+  ```
+  You now have two encryption keys — remember to switch between them.\
+  Commit to the todoapp repository and send the changes to GitLab.
+
+  #### Creating a frontend application
+  Now we are adding a new application to the infra repository that will interact with the new todoapp repository.\
+  Adding the app to charts/apps-prod/templates/todofrontend.yaml:
+  ```
+  # infra repo
+  vim charts/apps-prod/templates/todofrontend.yaml
+  
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: todofrontend
+    namespace: argocd
+  spec:
+    destination:
+      namespace: todofrontend
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/todofrontend
+      # Please note that the address has changed – this is a new parameter
+      repoURL: {{ .Values.spec.source.appsRepoURL }}
+      targetRevision: {{ .Values.spec.source.appsTargetRevision }}
+      helm:
+        valueFiles:
+          # Specifying a new path to the newly created key
+          - secrets+age-import:///helm-secrets-private-keys-apps/key.txt?../../values/todofrontend-prod.yaml
+    syncPolicy:
+      automated: {}
+      syncOptions:
+        - CreateNamespace=true
+  ```
+  Adding new parameters to charts/apps-prod/values.yaml:
+  ```
+  vim charts/apps-prod/values.yaml
+
+  spec:
+    source:
+      repoURL:
+      targetRevision:
+      appsRepoURL:
+      appsTargetRevision:
+    destination:
+      server:
+  ```
+  Editing values/apps-prod.yaml:
+  ```
+  vim values/apps-prod.yaml
+  
+  spec:
+    source:
+      repoURL: https://<gitlab addr>/yc-courses/infra.git
+      targetRevision: HEAD
+      appsRepoURL: https://<gitlab addr>/yc-courses/todoapp.git
+      appsTargetRevision: HEAD
+    destination:
+      server: https://<address of the production cluster> 
+  ```
+  Commit and send to GitLab.\
+  Now open the deployed application. Check that everything is correct in ArgoCD.
+
+  #### ArgoCD image updater
+  
 
 </details>
 
