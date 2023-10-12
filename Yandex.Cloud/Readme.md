@@ -1427,8 +1427,1021 @@ Not ready yet...
     syncPolicy:
       automated: {}
   ```
-  Commit and send to GitLab.\
+  Commit and send to GitLab.
+  ```
+  git add .
+  git commit -m "create infra-yc"
+  git push
+  ```
   When the app appears in ArgoCD, wait for the Healthy and Synced statuses.
+
+  #### Creating a new security group via Crossplane
+  Create a new file charts/infra-yc/templates/security-groups.yaml
+  ```
+  vim charts/infra-yc/templates/security-groups.yaml
+  
+  kind: SecurityGroup
+  apiVersion: vpc.yandex-cloud.jet.crossplane.io/v1alpha1
+  metadata:
+    name: prod-security-group
+  spec:
+    forProvider:
+      name: prod
+      folderIdRef:
+        name: default
+      networkIdRef:
+        name: default
+      ingress:
+        - description: rule-https
+          protocol: tcp
+          port: 443
+          v4CidrBlocks:
+            - 0.0.0.0/0
+        - description: rule-internal-traffic
+          protocol: any
+          fromPort: 0
+          toPort: 65535
+          predefinedTarget: self_security_group
+        - description: rule-internal-k8s-pods-services
+          protocol: any
+          fromPort: 0
+          toPort: 65535
+          v4CidrBlocks:
+            - 10.97.0.0/16  # new range for future cluster pod addresses
+            - 10.113.0.0/16  # new range for future cluster service addresses
+        - description: rule-yc-balancing
+          protocol: tcp
+          fromPort: 0
+          toPort: 65535
+          v4CidrBlocks:
+            - 198.18.235.0/24
+            - 198.18.248.0/24
+        - description: rule-icmp-internal
+          protocol: icmp
+          v4CidrBlocks:
+            - 10.0.0.0/8
+            - 192.168.0.0/16
+            - 172.16.0.0/12
+      egress:
+        - description: rule-egress-all
+          protocol: any
+          fromPort: 0
+          toPort: 65535
+          v4CidrBlocks:
+            - 0.0.0.0/0
+  ```
+
+  Commit and send to GitLab
+  ```
+  git add .
+  git commit -m "create security group"
+  git push
+  ```
+  Synchronizing the apps application in the argocd interface.\
+  Check that the Security Group has moved to the Synced and Healthy statuses.\
+  Check that everything was created correctly through the yc command:
+  ```
+  yc vpc security-group get prod 
+  ```
+
+  #### Creating a new cluster for applications
+  To create a new cluster, we will need:\
+  ServiceAccount with the editor role — so that the cluster can manage nodes\
+  Cluster — the cluster itself\
+  NodeGroup — node working group\
+  We will immediately prepare a chart with a typical cluster installation. To do this, create the charts/k8s-cluster folder:
+  ```
+  mkdir charts/k8s-cluster
+  ```
+  Creating a file charts/k8s-cluster/Chart.yaml:
+  ```
+  vim charts/k8s-cluster/Chart.yaml
+  
+  apiVersion: v2
+  name: k8s-cluster
+  description: k8s-cluster in yc cloud
+  version: 0.1.0
+  appVersion: "1.0"
+  ```
+  We need templates. To begin with, let's create a folder charts/k8s-cluster/templates and the first file charts/k8s-cluster/templates/_helpers.tpl.
+  In it, we will define the name of the cluster in order to reuse it in the future:
+  ```
+  mkdir charts/k8s-cluster/templates
+  vim charts/k8s-cluster/templates/_helpers.tpl
+  
+  {{/*
+  clusterFullName for service accounts/cluster/nodegroup
+  */}}
+  {{- define "clusterFullName" -}}
+  kube-{{ required "clusterName must be specified" .Values.clusterName }}
+  {{- end -}}
+  ```
+  That is, with clusterName: prod, the clusterFullName value will be kube-prod\
+  Creating the charts/k8s-cluster/templates/service-account.yaml with service account and role assignment:
+  ```
+  vim charts/k8s-cluster/templates/service-account.yaml
+  
+  apiVersion: iam.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: ServiceAccount
+  metadata:
+    name: {{ include "clusterFullName" . }}
+  spec:
+    forProvider:
+      name: {{ include "clusterFullName" . }}
+      folderIdRef:
+        name: default
+  ---
+  apiVersion: iam.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: FolderIAMMember
+  metadata:
+    name: {{ include "clusterFullName" . }}-editor
+  spec:
+    forProvider:
+      role: editor
+      serviceAccountRef:
+        name: {{ include "clusterFullName" . }}
+      folderIdRef:
+        name: default
+  ```
+  Creating the charts/k8s-cluster/templates/cluster.yaml with a description of the cluster itself:
+  ```
+  vim charts/k8s-cluster/templates/cluster.yaml
+  
+  apiVersion: kubernetes.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: Cluster
+  metadata:
+    name: {{ include "clusterFullName" . }}
+  spec:
+    forProvider:
+      name: {{ include "clusterFullName" . }}
+      master:
+        - zonal:
+            - zone: {{ .Values.clusterZone }}
+          publicIp: true
+          version: "{{ .Values.clusterVersion }}"
+          securityGroupIdsRefs:
+            - name: {{ .Values.securityGroup }}
+      nodeServiceAccountIdRef:
+        name: {{ include "clusterFullName" . }}
+      networkIdRef:
+        name: default
+      serviceAccountIdRef:
+        name: {{ include "clusterFullName" . }}
+      folderIdRef:
+        name: default
+      releaseChannel: RAPID
+      clusterIpv4Range: {{ .Values.clusterIpv4Range }}
+      serviceIpv4Range: {{ .Values.serviceIpv4Range }}
+  ```
+  Describe a group of working nodes in the charts/k8s-cluster/templates/node-group.yaml:
+  ```
+  vim charts/k8s-cluster/templates/node-group.yaml
+  
+  apiVersion: kubernetes.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: NodeGroup
+  metadata:
+    name: {{ include "clusterFullName" . }}-nodegroup-1
+  spec:
+    forProvider:
+      clusterIdRef:
+        name: {{ include "clusterFullName" . }}
+      name: {{ include "clusterFullName" . }}-nodegroup-1
+      version: "{{ .Values.clusterVersion }}"
+      instanceTemplate:
+        - platformId: "standard-v2"
+          networkInterface:
+            - securityGroupIdsRefs:
+                - name: {{ .Values.securityGroup }}
+              nat: true
+              subnetIdsRefs:
+                - name: {{ .Values.nodeSubnet }}
+          resources:
+            - memory: {{ .Values.nodeMem }}
+              cores: {{ .Values.nodeCores }}
+          bootDisk:
+            - type: "network-hdd"
+              size: {{ .Values.nodeDiskSize }}
+          schedulingPolicy:
+            - preemptible: true
+      scalePolicy:
+        - fixedScale:
+            - size: {{ .Values.nodeCount }}
+      allocationPolicy:
+        - location:
+            - zone: {{ .Values.clusterZone }}
+      maintenancePolicy:
+        - autoUpgrade: true
+          autoRepair: true
+          maintenanceWindow:
+            - startTime: "23:00"
+              duration: "3h"
+              day: "saturday"
+  ```
+  A detailed list of parameters can be found using kubectl explain, for example kubectl explain cluster.spec
+
+  Describe charts/k8s-cluster/values.yaml with default values:
+  ```
+  vim charts/k8s-cluster/values.yaml
+  
+  clusterName:
+  clusterVersion: "1.24"
+  clusterZone: "ru-central1-b"
+  clusterIpv4Range:
+  serviceIpv4Range:
+  nodeCount: 1
+  nodeDiskSize: 64
+  nodeMem: 2
+  nodeCores: 2
+  securityGroup:
+  nodeSubnet:
+  ```
+  We're done with that.\
+  Let's create our future production cluster.
+
+  #### Application for ArgoCD
+  values-a file with cluster settings
+  Creating the values/cluster-prod.yaml:
+  ```
+  vim values/cluster-prod.yaml
+  
+  clusterName: "prod"
+  clusterVersion: "1.24"
+  clusterZone: "ru-central1-b"
+  # do not forget that these address ranges must be specified
+  # in the Security Group prod created earlier
+  clusterIpv4Range: "10.113.0.0/16"  
+  serviceIpv4Range: "10.97.0.0/16"
+  nodeCount: 1
+  nodeDiskSize: 64
+  nodeMem: 2
+  nodeCores: 2
+  securityGroup: prod-security-group
+  nodeSubnet: default-ru-central1-b
+  ```
+  Creating a file with the charts/apps/templates/cluster-prod.yaml:
+  ```
+  vim charts/apps/templates/cluster-prod.yaml
+
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: cluster-prod
+    namespace: argocd
+  spec:
+    destination:
+      namespace: infrastructure
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/k8s-cluster
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      helm:
+        valueFiles:
+          - ../../values/cluster-prod.yaml
+    syncPolicy:
+      automated: {}
+  ```
+  Commit and send everything to GitLab 
+  ```
+  git add .
+  git commit -m "create prod cluster"
+  git push
+  ```
+  Now we are waiting for the cluster to be created.
+
+  Check that the cluster is in the interface and wait for its transition to the Running and Healthy status.\
+  Check if a group of working nodes has been created.
+  
+  Connect our cluster to ArgoCD.\
+  To do this, use the yc and argocd commands:
+  ```
+  # downloading the config for the new cluster
+  yc managed-kubernetes cluster get-credentials --name=kube-prod --external
+  argocd login <argocd address>:443 # next, enter the admin login and its password
+  # adding a cluster to argocd
+  argocd cluster add yc-kube-prod
+  ```
+  The last command will print the address of the new k8s cluster
+
+  #### Creating an App of Apps for a new cluster
+  Similarly to a cluster with infrastructure, we will prepare a separate chart, which will list applications for the production cluster.\
+  Creating a folder with the chart and the chart itself:
+  ```
+  mkdir charts/apps-prod
+  vim charts/apps-prod/Chart.yaml
+  
+  apiVersion: v2
+  name: applications-prod
+  description: Applications for prod cluster
+  version: 0.1.0
+  appVersion: "1.0"
+  ```
+  Creating charts/applications-prod/values.yaml:
+  ```
+  vim charts/apps-prod/values.yaml
+  
+  spec:
+    source:
+      repoURL:
+      targetRevision:
+    destination:
+      server:
+  ```
+  Adding the values file values/apps-prod.yaml:
+  ```
+  vim values/apps-prod.yaml
+  
+  spec:
+    source:
+      repoURL: <the path to the gitlab repository>
+      targetRevision: HEAD
+    destination:
+      server: <address of the new cluster>
+  ```
+  Adding our application to the initial ArgoCD settings file in additional applications is similar to the apps application:
+  ```
+  helm secrets dec values/argocd.yaml
+  vim values/argocd.yaml.dec
+  
+  server:
+      ... # previous settings
+      additionalApplications:
+          - ... # previous apps app
+          # apps-pro for a production cluster
+          - name: apps-prod
+            namespace: argocd
+            project: default
+            source:
+              helm:
+                # specifying the path to the parameters
+                valueFiles:
+                  - ../../values/apps-prod.yaml
+              # do not forget to change the chart to apps-prod
+              path: charts/apps-prod
+              repoURL: https://yc-courses-komarovv.gitlab.yandexcloud.net/yc-courses/infra.git
+            destination:
+              namespace: argocd
+              # please note that the application itself will be deployed in our infra-cluster, not production
+              server: https://kubernetes.default.svc
+            syncPolicy:
+              automated: { }
+  ```
+  Commit and send to GitLab
+  ```
+  helm secrets enc values/argocd.yaml
+  git add .
+  git commit -m "apps for prod"
+  git push
+  ```
+  Apply the ArgoCD chart manually:\
+  Change the context of the kubectl utility - now we need an infra cluster
+  ```
+  helm secrets -n argocd upgrade --install \
+      argocd \
+      charts/argo-cd \
+      -f values/argocd.yaml
+  ```
+  Go to the ArgoCD interface and make sure that the application has appeared.
+
+  #### Adding Yandex LAB Controller to the new cluster
+  We need a chart, values and application. 
+  Creating values/alb-prod.yaml:
+  ```
+  vim values/alb-prod.yaml
+  
+  folderId: <FOLDER_ID>
+  clusterId: <NEW_CLUSTER_ID>
+  saKeySecretKey: |
+      the key can be used the same as in alb.yaml
+  ```
+  Creating charts/apps-prod/templates/alb.yaml:
+  ```
+  mkdir charts/apps-prod/templates/
+vim charts/apps-prod/templates/alb.yaml
+
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: yc-alb-ingress-prod
+    namespace: argocd
+  spec:
+    destination:
+      namespace: yc-alb-ingress
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      # Specifying the path to the chart
+      path: charts/yc-alb-ingress-controller-chart
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      # secrets+age-import://<key-volume-mount>/<key-name>.txt?<relative/path/to/the/encrypted/secrets.yaml>
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/alb-prod.yaml
+    syncPolicy:
+      automated: {}
+      syncOptions:
+        - CreateNamespace=true
+  ```
+  The chart itself is already there, so send a push and observe the deployment of the LAB Controller in the new cluster:
+  ```
+  git add .
+  git commit -m "alb prod"
+  git push
+  ```
+
+  #### Creating a managed PosgtreSQL cluster
+  Create a Helm chart for creating a PostgreSQL cluster in the same way as we created a chart for a Kubernetes cluster.\
+  Creating a directory for the chart and the chart itself charts/postgres/Chart.yaml:
+  ```
+  mkdir charts/postgres
+  vim charts/postgres/Chart.yaml
+  
+  apiVersion: v2
+  name: postgres-cluster
+  description: postgresql yandex cloud cluster
+  version: 0.1.0
+  appVersion: "1.0"
+  ```
+  Create a folder with templates and a file charts/postgres/templates/_helpers.tpl with a template name for the cluster:
+  ```
+  mkdir charts/postgres/templates
+  vim charts/postgres/templates/_helpers.tpl
+  
+  {{/*
+  clusterFullName for service accounts/cluster/nodegroup
+  */}}
+  {{- define "postgresFullName" -}}
+  postgres-{{ required "postgresName must be specified" .Values.postgresName }}
+  {{- end -}}
+  ```
+  Creating a PostgreSQL charts/postgres/templates/cluster.yaml cluster template:
+  ```
+  vim charts/postgres/templates/cluster.yaml
+  
+  apiVersion: mdb.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: PostgresqlCluster
+  metadata:
+    name: {{ include "postgresFullName" . }}
+  spec:
+    forProvider:
+      # setting the cluster name
+      name: {{ include "postgresFullName" . }}
+      # setting the directory
+      folderIdRef:
+        name: default
+      # setting the network
+      networkIdRef:
+        name: default
+      securityGroupIdsRefs:
+        - name: {{ .Values.securityGroup }}
+      config:
+        - resources:
+              # specify the disk size
+            - diskSize: {{ .Values.diskSize }}
+              # specify the type of instance, they can be viewed using the command
+              # yc postgres resource-preset list
+              resourcePresetId: {{ .Values.resourcePresetId }}
+              # setting the disk type
+              diskTypeId: {{ .Values.diskTypeId }}
+          # specifying the Posgtres version
+          version: "{{ .Values.postgresVersion }}"
+      database:
+        # Creating a database
+        - name: {{ .Values.dbName }}
+          owner: {{ .Values.dbUser }}
+      # Specifying the environment
+      environment: PRODUCTION
+      host:
+        # setting the zone in which the cluster will be located
+        - zone: {{ .Values.postgresZone }}
+  
+      user:
+        # creating a user
+        - name: {{ .Values.dbUser }}
+          # specify the secret from which to take the password to create a user
+          passwordSecretRef:
+            key: password
+            name: {{ include "postgresFullName" . }}-creds
+            namespace: {{ .Values.infraNamespace }}
+  ```
+  Next, we will create the secret template charts/postgres/templates/secret.yaml in which the password will be stored:
+  ```
+  vim charts/postgres/templates/secret.yaml
+  
+  kind: Secret
+  apiVersion: v1
+  metadata:
+    name: {{ include "postgresFullName" . }}-creds
+    namespace: {{ .Values.infraNamespace }}
+  stringData:
+    password: {{ .Values.dbPassword }}
+  ```
+  Define values for the chart in charts/postgres/values.yaml:
+  ```
+  vim charts/postgres/values.yaml
+  
+  postgresName:
+  postgresZone: "ru-central1-b"
+  postgresVersion: "14"
+  infraNamespace: "infrastructure"
+  securityGroup:
+  
+  dbUser:
+  dbPassword:
+  dbName:
+  
+  diskSize: 10
+  resourcePresetId: "b1.medium"
+  diskTypeId: "network-hdd"
+  ```
+  The chart is ready, it remains to apply it. To do this, create values/postgres-prod.yaml:
+  ```
+  vim values/postgres-prod.yaml
+  
+  postgresName: prod
+  securityGroup: prod-security-group
+  
+  dbUser: todolist_prod_user
+  dbPassword: <PASS>
+  dbName: todolist_prod
+  ```
+  Do not forget to encrypt it:
+  ```
+  helm secrets enc values/postgres-prod.yaml
+  ```
+  Creating an application in charts/apps/templates/postgres-prod.yaml:
+  ```
+  vim charts/apps/templates/postgres-prod.yaml
+  
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: postgres-prod
+    namespace: argocd
+  spec:
+    destination:
+      namespace: infrastructure
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/postgres
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/postgres-prod.yaml
+    syncPolicy:
+      automated: {}
+  ```
+  Ready! Commit and send to GitLab and wait for PostgreSQL deployment:
+  ```
+  git add .
+  git commit -m "deploy postgressql"
+  git push
+  ```
+  Check in the console.\
+  Waiting for the transition to the Alive status.
+
+  #### Deploying httpbin in a production cluster for debugging
+  To do this, edit the chart and add parameters for Ingress in the charts/httpbin/templates/all.yaml file:
+  ```
+  vim charts/httpbin/templates/all.yaml
+
+  #add
+  ...
+  apiVersion: networking.k8s.io/v1
+  kind: Ingress
+  metadata:
+    name: httpbin-tls
+    annotations:
+      ingress.alb.yc.io/subnets: {{ .Values.subnetId }}
+      ingress.alb.yc.io/external-ipv4-address: {{ .Values.ingressIp }}
+      ingress.alb.yc.io/group-name: {{ .Values.ingressGroup }}
+      ingress.alb.yc.io/security-groups: {{ .Values.securityGroup }}
+  spec:
+    tls:
+      - hosts:
+          - {{ .Values.ingressHost }}
+        secretName: yc-certmgr-cert-id-{{ .Values.certificateId }}
+    rules:
+      - host: {{ .Values.ingressHost }}
+        http:
+          paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: httpbin
+                  port:
+                    number: 80
+  ```
+  And add these parameters to charts/httpbin/values.yaml:
+  ```
+  vim charts/httpbin/values.yaml
+  
+  subnetId:
+  certificateId:
+  ingressIp: 
+  ingressGroup: 
+  ingressHost:
+  securityGroup:
+  ```
+  Creating a new IP address for the load balancer inside the production cluster:
+  ```
+  yc vpc address create --name=apps-alb \ 
+  --labels reserved=true \
+  --external-ipv4 zone=ru-central1-b
+  ```
+
+  Importing the yc-courses zone to charts/infra-yc/templates/import.yaml:
+  ```
+  vim charts/infra-yc/templates/import.yaml
+  
+  ... # previous lines
+  ---
+  kind: Zone
+  apiVersion: dns.yandex-cloud.jet.crossplane.io/v1alpha1
+  metadata:
+    name: yc-courses
+    annotations:
+      crossplane.io/external-name: "<yc-courses zone id>"
+  spec:
+    deletionPolicy: Orphan
+    forProvider:
+      name: yc-courses
+      zone: "<domain>."
+      public: true
+      folderIdRef:
+        name: default
+  ```
+  Creating a DNS record in a new file charts/infra-yc/templates/dns.yaml:
+  ```
+  vim charts/infra-yc/templates/dns.yaml
+  
+  kind: Recordset
+  apiVersion: dns.yandex-cloud.jet.crossplane.io/v1alpha1
+  metadata:
+    name: apps
+  spec:
+    deletionPolicy: Orphan  # don't forget to put down DeletionPolicy
+    forProvider:
+      data:
+        - "<the apps-alb ip address obtained above>"
+      name: "*.apps.<domain>."
+      ttl: 600
+      type: A
+      zoneIdRef:
+        name: yc-courses
+  ```
+  Creating a certificate:
+  ```
+  yc certificate-manager certificate request \
+    --name kube-prod \
+    --domains '*.apps.<domain>' \
+    --challenge dns
+  ```
+  With the received certificate ID, we create another record:
+  ```
+  vim charts/infra-yc/templates/dns.yaml
+  
+  kind: Recordset
+  apiVersion: dns.yandex-cloud.jet.crossplane.io/v1alpha1
+  metadata:
+    name: apps-cert-challenge
+  spec:
+    deletionPolicy: Orphan
+    forProvider:
+      data:
+        - "<CERT_ID>.cm.yandexcloud.net."
+      name: "_acme-challenge.apps.<domain>."
+      ttl: 600
+      type: CNAME
+      zoneIdRef:
+        name: yc-courses
+  ```
+  Commit and push to GitLab, synchronize the application with infra-yc.
+  ```
+  git add .
+  git commit -m "create crt"
+  git push
+  ```
+  Waiting for the certificate to switch to the ISSUED status. Issuing a certificate may take time.\
+  Specify the received certificate ID and IP address in values/httpbin-prod.yaml:
+  ```
+  vim values/httpbin-prod.yaml
+  
+  subnetId: <SUBNET_ID>
+  certificateId: <NEW_CERT_ID>
+  ingressIp: <ip address for the production load balancer>
+  ingressGroup: apps-ingress
+  ingressHost: httpbin.apps.<domain>
+  securityGroup: <SG_ID>
+  ```
+  Do not forget to edit the file values/http bin.yaml for httpbin in an infrastructure cluster!
+  ```
+  helm secrets dec values/httpbin.yaml 
+  vim values/httpbin.yaml.dec
+
+  subnetId: <SUBNET_ID>
+  certificateId: <CERT_IR>
+  ingressIp: <ip address for the infra load balancer>
+  ingressGroup: infra-ingress
+  ingressHost: httpbin.infra.<domain>
+  securityGroup: <SG_ID>
+
+  helm secrets enc values/httpbin.yaml
+  ```
+  Creating the application charts/apps-prod/templates/httpbin-prod.yaml:
+  ```
+vim charts/apps-prod/templates/httpbin-prod.yaml
+
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: httpbin-prod
+    namespace: argocd
+  spec:
+    destination:
+      namespace: httpbin
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/httpbin
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/httpbin-prod.yaml
+    syncPolicy:
+      automated: {}
+      syncOptions:
+        - CreateNamespace=true
+  ```
+  Commit and push to GitLab, wait for synchronization with ArgoCD:
+  ```
+  git add .
+  git commit -m "update httpbin conf"
+  git push
+  ```
+  Checking the deployed application.
+
+  #### Part CI. Build an image and send it to Registry.
+  Copy the frontend part of the repository to a new project on your GitLab.\
+  `https://github.com/yandex-cloud-examples/yc-courses-devops-course1/tree/master/todofrontend`
+  Call it the same — todofrontend. To configure CI , you will need a file .gitlab-ci.yml in the root of the project. It is important to make a separate repository from the main infra for the application itself.
+  ```
+  build:
+    stage: build
+    script:
+      - echo "It works!"
+  ```
+  Commit the file and send it to GitLab.\
+  Let's check that the runner is configured correctly and everything works.\
+  ##### If something went wrong and gitlab-runner doesn't work. Check and add group/s for runner:
+  ```
+  GitLab
+  Admin Area -> Runners -> choose runner and edit -> add group/s
+  ```
+
+  Add the Kaniko image to the job so that we can immediately use its commands without additional installation steps:
+  ```
+  vim .gitlab-ci.yml
+
+  build:
+    stage: build
+    image:
+      name: gcr.io/kaniko-project/executor:debug
+      entrypoint: [""]
+  script:
+      - echo "It works!"
+  ```
+
+  We will need a registry to store the images.
+  Create it through the infra repository. Adding the charts/infra-yc/templates/containers.yaml file:
+  ```
+  # infra repo
+  vim charts/infra-yc/templates/containers.yaml
+  
+  apiVersion: container.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: Registry
+  metadata:
+    name: registry
+  spec:
+    forProvider:
+      name: registry
+      folderIdRef:
+        name: default
+  ```
+  Now let's create two service accounts to interact with registry.\
+  To do this, add the charts/infra-yc/templates/service_accounts.yaml file:
+  ```
+vim charts/infra-yc/templates/service_accounts.yaml
+
+  # account for sending from the ci system
+  apiVersion: iam.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: ServiceAccount
+  metadata:
+    name: registry-pusher
+  spec:
+    deletionPolicy: Orphan
+    forProvider:
+      name: registry-pusher
+      folderIdRef:
+        name: default
+  ---
+  apiVersion: iam.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: FolderIAMBinding
+  metadata:
+    name: registry-pusher
+  spec:
+    deletionPolicy: Orphan
+    forProvider:
+      serviceAccountsRef:
+        - name: registry-pusher
+      role: container-registry.images.pusher
+      folderIdRef:
+        name: default
+  ---
+  # to download images
+  apiVersion: iam.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: ServiceAccount
+  metadata:
+    name: registry-puller
+  spec:
+    deletionPolicy: Orphan
+    forProvider:
+      name: registry-puller
+      folderIdRef:
+        name: default
+  ---
+  apiVersion: iam.yandex-cloud.jet.crossplane.io/v1alpha1
+  kind: FolderIAMBinding
+  metadata:
+    name: registry-puller
+  spec:
+    deletionPolicy: Orphan
+    forProvider:
+      serviceAccountsRef:
+        - name: registry-puller
+      role: container-registry.images.puller
+      folderIdRef:
+        name: default
+  ```
+  Commit and send to GitLab.
+
+  Waiting for the creation of a service account.\
+  We get the key for the service account. It will be required for authorization in registry during builds:
+  ```
+  yc iam key create --service-account-name registry-pusher --output sa-key-reg-push.json
+  ```
+
+  Let's go back to the CI Job description. Log in to the registry and build an image. \
+  We need to figure out how to name and tag it. The variables already built into GitLab will help us:\
+  CI_PROJECT_PATH for naming the image\
+  CI_COMMIT_SHA for image tagging\
+  To connect Kaniko to registry, add environment variables to CI/CD. Open the settings of the group in which we created the repository and set the following values:
+  ```
+  YC_CI_REGISTRY: cr.yandex
+  YC_CI_REGISTRY_ID: the id of the created registry can be obtained via the command "yc container registry get registry"
+  YC_CI_REGISTRY_USER: json_key
+  YC_CI_REGISTRY_PASSWORD: the key obtained when executing the command "yc team key create" step above (all json)
+  ```
+
+  And now let's write our task of assembling the image:
+  ```
+  # todofrontend repo
+  vim .gitlab-ci.yml
+  
+  build:
+    stage: build
+    image:
+      name: gcr.io/kaniko-project/executor:debug
+      entrypoint: [""]
+    # only for the main branch – so that the developer branches are not rubbed by the deployment
+    only:
+      - master
+      - main
+    script:
+      # creating a directory for the config
+      - mkdir -p /kaniko/.docker
+      # render the config from variables and put it in /kaniko/.docker/config.json
+      - echo "{\"auths\":{\"${YC_CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${YC_CI_REGISTRY_USER}" "${YC_CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+      # Connecting kaniko
+      - >-
+        /kaniko/executor
+        --context "${CI_PROJECT_DIR}"
+        --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+        --destination "${YC_CI_REGISTRY}/${YC_CI_REGISTRY_ID}/${CI_PROJECT_PATH}:${CI_COMMIT_SHA}"
+        # I added next parameters because the kaniko worked too slow, it should be faster now
+        --snapshotMode=redo
+        --use-new-run
+  ```
+  Commit and send to GitLab.\
+  Check that the image has been created.\
+  Open registry via the web interface and check that there is an image there.\
+  We have finished assembling the image, now it remains only to deploy it in Kubernetes.
+
+  #### Part CD. Deploying the application
+  We will prepare a separate repository with charts for our application. To do this, create a repository and call it todoapp. 
+  Inside it, we will describe charts and values for the application in a similar way to the infra repository.
+  Now the repository itself needs to be connected to ArgoCD.\
+  Connecting the repository to ArgoCD.\
+  Please note that we continue to work in the infra repository.
+  Here we will need to create a separate chart in which we will create repositories. \
+  Call it repos and add charts/repos/Chart.yaml:
+  ```
+  # infra repo
+  mkdir charts/repos
+  vim charts/repos/Chart.yaml
+  
+  apiVersion: v2
+  name: argocd-repos
+  description: argocd repos chart
+  version: 0.1.0
+  appVersion: "1.0"
+  ```
+  Repositories in ArgoCD are added via a special secret with an annotation argocd.argoproj.io/secret-type: repository, inside which the connection parameters are described.\
+  Adding charts/repos/templates/repo.yaml with creating repositories via Secret:
+  ```
+  mkdir charts/repos/templates/
+  vim charts/repos/templates/repo.yaml
+  
+  {{- range $repo_key, $repo_value := .Values.repositories }}
+  ---
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    name: argocd-repo-{{ $repo_key }}
+    labels:
+      argocd.argoproj.io/secret-type: repository
+  data:
+    {{- range $key, $value := $repo_value }}
+    {{ $key }}: {{ $value | b64enc }}
+    {{- end }}
+  {{- end }}
+  ```
+  Adding charts/repos/values.yaml:
+  ```
+  vim charts/repos/values.yaml
+  repositories: []
+  ```
+  In the todoapp settings, in the Access Tokens section, create a new token with the Maintainer role and read_repository rights:
+  ```
+  # GitLab
+  todoapp 
+   Access Tokens
+    Create new token
+    role: Maintainer
+    rules: read_repository
+    Token:
+    <TOKEN>
+  ```
+  Now let's describe values/repos.yaml together with the new repository:
+  ```
+  # infra repo
+  vim values/repos.yaml
+  
+  repositories:
+    todolist:
+        password: <TOKEN>
+        username: gitlab-ci-token
+        project: default
+        type: git
+        url: <https address of the repository>
+  ```
+  Don't forget to encrypt this file with Helm Secrets:
+  `helm secrets enc values/repos.yaml`\
+  Add the application to the apps chart and create a file with the charts/apps/templates/repos.yaml application:
+  ```
+  vim charts/apps/templates/repos.yaml
+  
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: repos
+    namespace: argocd
+  spec:
+    destination:
+      # install it in the same namespace as argocd
+      namespace: argocd
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/repos
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/repos.yaml
+    syncPolicy:
+      automated: {}
+  ```
+  Commit and send to GitLab.\
+  Syncing apps application.
+
+  #### Helm Chart and Application in ArgoCD
 
 </details>
 
