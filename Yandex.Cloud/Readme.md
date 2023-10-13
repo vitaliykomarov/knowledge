@@ -2842,3 +2842,5 @@ vim charts/infra-yc/templates/service_accounts.yaml
   #### Oops..it isn't ready. Maybe later :)
 
 </details>
+
+## Step 2. Creating dynamic environments for development and testing
