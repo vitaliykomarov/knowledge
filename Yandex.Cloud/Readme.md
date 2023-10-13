@@ -2742,7 +2742,97 @@ vim charts/infra-yc/templates/service_accounts.yaml
   Commit, send it to Gitlab and check that the image has been assembled and sent to registry.
 
   ##### Part CD.
+  Creating values/todobackend-prod.yaml:
+  ```
+  # todoapp repo
+  vim values/todobackend-prod.yaml
   
+  image:
+      repository: cr.yandex/<id registry>/yc-courses/todobackend
+      tag: <tag from the latest build>
+  
+  ingress:
+      enabled: true
+      annotations:
+          ingress.alb.yc.io/subnets: <SUBNET_ID>
+          ingress.alb.yc.io/external-ipv4-address: <ip address for the prod load balancer>
+          ingress.alb.yc.io/group-name: apps-ingress
+          ingress.alb.yc.io/security-groups: <PROD_SG_ID>
+      hosts:
+          - host: todoapp.apps.<domain>
+            paths:
+              - path: /api
+                pathType: ImplementationSpecific
+      tls:
+          - hosts:
+              - todoapp.apps.<domain>
+            secretName: yc-certmgr-cert-id-<*.apps.<domain>_CERT_ID>
+  service:
+      type: NodePort
+      nodePort: 30084  # free port
+  
+  env:
+    - name: DB_PG_NAME
+      value: <the name of the database from crossplane>
+    - name: DB_PG_USER
+      value: <user name from crossplane>
+    - name: DB_PG_PASSWORD
+      value: <user password from crossplane>
+    - name: DB_PG_HOST
+      value: c-<POSTGRES_CLUSTER_ID>.rw.mdb.yandexcloud.net
+    - name: DB_PG_PORT
+      value: "6432"
+  
+  migrations:
+    activeDeadlineSeconds: 300
+    command:
+      - python
+      - manage.py
+      - migrate
+  ```
+  Don't forget to encrypt values/todobackend-prod.yaml.
+  ```
+  helm secrets enc values/todobackend-prod.yaml
+  ```
+  Commit the changes to the todoapp repository and send them to Gitlab.
+  
+  Adding the application to the infra repository in charts/apps-prod/templates/todobackend.yaml:
+  ```
+  # infra repo
+  vim charts/apps-prod/templates/todobackend.yaml
+  
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: todobackend
+    namespace: argocd
+    annotations:
+      argocd-image-updater.argoproj.io/image-list: backend=cr.yandex/<id registry>/yc-courses/todobackend
+      argocd-image-updater.argoproj.io/backend.update-strategy: latest
+  spec:
+    destination:
+      namespace: todobackend
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/todobackend
+      repoURL: {{ .Values.spec.source.appsRepoURL }}
+      targetRevision: {{ .Values.spec.source.appsTargetRevision }}
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys-apps/key.txt?../../values/todobackend-prod.yaml
+    syncPolicy:
+      automated: {}
+      syncOptions:
+        - CreateNamespace=true
+  ```
+  Commit the changes and send them to Gitlab.\
+  Go to ArgoCD, check that the application has been created.
+
+  Check the performance of the application itself, go to the address of the application and create a task there.\
+  Check that the task has been created.
+
+  #### This step is done
 
 </details>
 
