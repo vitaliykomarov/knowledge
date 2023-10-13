@@ -2611,6 +2611,137 @@ vim charts/infra-yc/templates/service_accounts.yaml
   Now open the deployed application. Check that everything is correct in ArgoCD.
 
   #### ArgoCD image updater
+  It remains to set up automatic updating of the chart when developers build a new version — for this we use argocd-image-updater.\
+  Download the argocd-image-updater chart to the infra repository:
+  ```
+  # infra repo
+  helm repo add argo https://argoproj.github.io/argo-helm
+  helm pull argo/argocd-image-updater --untar --untardir=charts
+  ```
+  Now add a new application to charts/apps/templates/argocd-image-updater.yaml:
+  ```
+  vim charts/apps/templates/argocd-image-updater.yaml
+  
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: argocd-image-updater
+    namespace: argocd
+  spec:
+    destination:
+      # argocd-image-updater itself is also placed inside the argocd namespace
+      namespace: argocd
+      server: {{ .Values.spec.destination.server }}
+    project: default
+    source:
+      path: charts/argocd-image-updater
+      repoURL: {{ .Values.spec.source.repoURL }}
+      targetRevision: {{ .Values.spec.source.targetRevision }}
+      helm:
+        valueFiles:
+          - secrets+age-import:///helm-secrets-private-keys/key.txt?../../values/argocd-image-updater.yaml
+    syncPolicy:
+      automated: {}
+      syncOptions:
+        - CreateNamespace=true
+  ```
+  Get the key for the registry-puller account:
+  ```
+  yc iam key create --service-account-name registry-puller --output sa-key.json
+  ```
+  The key in the file must be specified in a flat format (without line breaks).\
+  In order not to erase them manually, you can use the jq utility:
+  ```
+  cat sa-key.json | jq -c .
+  ```
+  The command will print the same JSON, only in a flat format.
+
+  Also add values/argocd-image-updater.yaml:
+  ```
+  vim values/argocd-image-updater.yaml
+  
+  extraEnv:
+      - name: YC_REGISTRY_CREDS
+        value: 'json_key:<json key from the registry-puller service account>'
+  
+  config:
+      argocd:
+          grpcWeb: false
+          serverAddress: https://argocd-server.argocd
+          insecure: true
+          plaintext: false
+      registries:
+          - name: YC
+            api_url: https://cr.yandex
+            ping: false
+            credentials: env:YC_REGISTRY_CREDS
+            prefix: cr.yandex
+  ```
+  Reminder. Don't forget to encrypt values/argocd-image-updater.yaml and delete values/argocd-image-updater.yaml.dec.
+
+  Setting up annotations for the application in charts/apps-prod/templates/todofrontend.yaml:
+  ```
+  vim charts/apps-prod/templates/todofrontend.yaml
+  
+  apiVersion: argoproj.io/v1alpha1
+  kind: Application
+  metadata:
+    name: todofrontend
+    namespace: argocd
+    annotations:
+      argocd-image-updater.argoproj.io/image-list: front=cr.yandex/<id registry>/yc-courses/todofrontend
+      argocd-image-updater.argoproj.io/front.update-strategy: latest
+  ```
+  Now try to update the code. To do this, edit the title of the main page in the file todofrontend/src/App.js.\
+  You need to edit a similar place in your repository:
+  ```
+  # todofrontend repo
+  vim src/App.js
+  
+  <main className="content">
+    <h1 className="text-white text-uppercase text-center my-4">Todo app version 2</h1>
+    <div className="row ">
+  ```
+  Waiting for the image to be assembled.\
+  After that, go to ArgoCD.\
+  Note that the application is separate from values.yaml has a new tag.\
+  Open the address of the application and make sure that the new version is downloaded.
+
+  ##### Important
+  At this stage I ran into a problem, the application was not working and argocd was giving errors.\
+  It helped to change `ingress.hosts[0].paths[0].pathType` from `ImplementationSpecific` to `Prefix` in the file `values/todofrontend-prod.yaml` of the `todoapp` repository:
+  ```
+  # todoapp repo
+  vim values/todofrontend-prod.yaml
+  ingress.hosts[0].paths[0].pathType change from ImplementationSpecific to Prefix
+  ```
+
+  #### Configuring CI/CD for a backend application
+  ##### Part CI.
+  Clone the todobackend repository into your gitlab and create a file .gitlab-ci.yml is similar to the frontend part:\
+  https://github.com/yandex-cloud-examples/yc-courses-devops-course1/tree/master/todoapp/charts
+  ```
+  vim .gitlab-ci.yml
+  
+  build:
+    stage: build
+    image:
+      name: gcr.io/kaniko-project/executor:debug
+      entrypoint: [""]
+    script:
+      - mkdir -p /kaniko/.docker
+      - echo "{\"auths\":{\"${YC_CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${YC_CI_REGISTRY_USER}" "${YC_CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+      - >-
+        /kaniko/executor
+        --context "${CI_PROJECT_DIR}"
+        --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+        --destination "${YC_CI_REGISTRY}/${YC_CI_REGISTRY_ID}/${CI_PROJECT_PATH}:${CI_COMMIT_SHA}"
+        --snapshotMode=redo
+        --use-new-run
+  ```
+  Commit, send it to Gitlab and check that the image has been assembled and sent to registry.
+
+  ##### Part CD.
   
 
 </details>
