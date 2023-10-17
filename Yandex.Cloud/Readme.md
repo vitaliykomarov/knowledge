@@ -53,7 +53,14 @@ export SOPS_AGE_RECIPIENTS=%AGE_KEY%
 ## GitLab repo and sctructure
 [Link](https://gitlab.com/yc-projects) to the project group in gitlab
 #### Structure
-Not ready yet...
+Gitlab group
+```
+YC projects
+├── infra         
+├── todoapp        
+├── todobackend 
+└── todofrontend   
+```
 
 ## Step 1. GitOps model
 
