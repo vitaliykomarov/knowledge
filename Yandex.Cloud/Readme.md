@@ -56,13 +56,13 @@ export SOPS_AGE_RECIPIENTS=%AGE_KEY%
 Gitlab group
 ```
 YC projects
-├── infra         
-├── todoapp        
-├── todobackend 
-└── todofrontend   
+├── infra           # repository with charts and their parameters for the infrastructure
+├── todoapp         # repository with charts
+├── todobackend     # repository with the application's backend source code
+└── todofrontend    # repository with the application frontend source code
 ```
 
-## Step 1. GitOps model
+## GitOps model
 
 <details>
   <summary><h3>Long version</h3></summary>
@@ -2850,4 +2850,3 @@ vim charts/infra-yc/templates/service_accounts.yaml
 
 </details>
 
-## Step 2. Creating dynamic environments for development and testing
